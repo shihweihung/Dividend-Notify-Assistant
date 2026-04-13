@@ -1,0 +1,102 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users/{userId}
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - displayName: string
+    //   - photoURL: string
+    //   - lastLogin: string (timestamp)
+    //
+    // Collection: users/{userId}/stocks/{stockSymbol}
+    // Fields:
+    //   - symbol: string (required)
+    //   - name: string (required)
+    //   - shares: number (required)
+    //   - dividendInfo: map (optional)
+    //   - manualDividendAdjustment: number (optional)
+    //   - updatedAt: string (timestamp)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "shihweihong@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(allowedFields) {
+      return request.resource.data.keys().hasOnly(allowedFields);
+    }
+
+    // Domain Validators
+    function isValidUserProfile(data) {
+      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'photoURL', 'lastLogin', 'role']) &&
+             data.uid is string && data.uid.size() > 0 && data.uid.size() < 128 &&
+             data.email is string && data.email.size() < 256 && isValidEmail(data.email) &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 100)) &&
+             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() < 2048)) &&
+             (!('lastLogin' in data) || data.lastLogin is string) &&
+             (!('role' in data) || (data.role is string && data.role in ['admin', 'user']));
+    }
+
+    function isValidStock(data) {
+      return hasOnlyAllowedFields(['symbol', 'name', 'shares', 'dividendInfo', 'updatedAt', 'manualDividendAdjustment']) &&
+             data.symbol is string && data.symbol.size() > 0 && data.symbol.size() < 20 &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.shares is number && data.shares >= 0 &&
+             (!('manualDividendAdjustment' in data) || data.manualDividendAdjustment == null || data.manualDividendAdjustment is number);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      
+      allow create: if isOwner(userId) && isValidUserProfile(request.resource.data) && 
+                      (!('role' in request.resource.data) || request.resource.data.role == 'user');
+      
+      allow update: if (isOwner(userId) && isValidUserProfile(request.resource.data) && 
+                        request.resource.data.role == resource.data.role) || isAdmin();
+
+      match /stocks/{stockSymbol} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) && isValidStock(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    match /market_data/{symbol} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated();
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

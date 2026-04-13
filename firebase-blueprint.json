@@ -1,0 +1,55 @@
+{
+  "entities": {
+    "Stock": {
+      "title": "Stock",
+      "description": "Information about a stock held by a user",
+      "type": "object",
+      "properties": {
+        "symbol": { "type": "string", "description": "The stock symbol (e.g., 2330.TW)" },
+        "name": { "type": "string", "description": "The name of the company" },
+        "shares": { "type": "number", "description": "Number of shares held" },
+        "dividendInfo": {
+          "type": "object",
+          "properties": {
+            "amount": { "type": "number" },
+            "exDividendDate": { "type": "string" },
+            "paymentDate": { "type": "string" },
+            "yield": { "type": "number" },
+            "currentPrice": { "type": "number" },
+            "lastUpdated": { "type": "string" }
+          }
+        },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "manualDividendAdjustment": { "type": "number", "description": "Manual correction for dividend amount" }
+      },
+      "required": ["symbol", "name", "shares"]
+    },
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Basic information about the user",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "lastLogin": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile data"
+    },
+    "/users/{userId}/stocks/{stockSymbol}": {
+      "schema": "Stock",
+      "description": "User's individual stock holdings"
+    },
+    "/market_data/{symbol}": {
+      "schema": "DividendInfo",
+      "description": "Cached market data for stocks to reduce API calls"
+    }
+  }
+}

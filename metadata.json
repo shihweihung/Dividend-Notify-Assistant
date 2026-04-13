@@ -1,0 +1,5 @@
+{
+  "name": "台股股息小幫手",
+  "description": "整理台股個股及ETF的除息日、發放日與金額，並整合至行事曆檢視。",
+  "requestFramePermissions": []
+}
