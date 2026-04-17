@@ -12,7 +12,8 @@ export type DividendInfo = {
   amount: number; // Next/Latest single payment amount
   receivedAmountCurrentYear?: number; // Sum of dividends already paid in current year
   pendingAmountCurrentYear?: number; // Sum of dividends announced but not yet paid in current year
-  monthlyDistribution?: number[]; // Array of 12 numbers representing dividend amount per share for each month
+  monthlyDistribution?: number[]; // Array of 12 numbers representing received dividend amount per share for each month
+  pendingMonthlyDistribution?: number[]; // Array of 12 numbers representing pending dividend amount per share for each month
   currentPrice?: number;
   yield?: number;
   updatedAt: string;
@@ -20,6 +21,8 @@ export type DividendInfo = {
   topComponents?: EtfComponent[];
   source?: string;
   sourceUrl?: string;
+  isPaymentDateEstimated?: boolean;
+  status?: string;
 }
 
 export type StockEntry = {

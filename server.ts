@@ -4,8 +4,6 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
-import { google } from "googleapis";
-import { GoogleGenAI } from "@google/genai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,8 +15,10 @@ async function startServer() {
 
   app.get("/api/debug-env", (req, res) => {
     res.json({
-      geminiKeyLength: process.env.GEMINI_API_KEY?.length,
-      geminiKeyPrefix: process.env.GEMINI_API_KEY?.substring(0, 4),
+      customKeyLength: process.env.CUSTOM_GEMINI_API_KEY?.length,
+      customKeyPrefix: process.env.CUSTOM_GEMINI_API_KEY?.substring(0, 4),
+      systemKeyLength: process.env.GEMINI_API_KEY?.length,
+      systemKeyPrefix: process.env.GEMINI_API_KEY?.substring(0, 4),
     });
   });
 
@@ -44,101 +44,6 @@ async function startServer() {
     } catch (error) {
       console.error("Server-side Gemini error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "AI 查詢失敗" });
-    }
-  });
-
-  // OAuth 2.0 Client
-  const oauth2Client = new google.auth.OAuth2(
-    "1020628400729-cafsiu9cg8am5gc1btvna0ghgjvmitt3.apps.googleusercontent.com",
-    process.env.CLIENT_SECRET,
-    `https://ais-dev-twr673v6jih523sgrdooye-315522563695.asia-east1.run.app/auth/callback`
-  );
-
-  // API: Get Auth URL
-  app.get("/api/auth/url", (req, res) => {
-    const scopes = ["https://www.googleapis.com/auth/calendar.events"];
-    const url = oauth2Client.generateAuthUrl({
-      access_type: "offline",
-      scope: scopes,
-    });
-    res.json({ url });
-  });
-
-  // API: Callback
-  app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
-    const { code, state: userId } = req.query;
-    console.log("Auth callback received:", { code, userId });
-    try {
-      const { tokens } = await oauth2Client.getToken(code as string);
-      console.log("Tokens received");
-      
-      // Store tokens in memory for this session
-      oauth2Client.setCredentials(tokens);
-      
-      // For this prototype, we'll send a success message to the opener
-      res.send(`
-        <html>
-          <body>
-            <script>
-              if (window.opener) {
-                window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
-                window.close();
-              } else {
-                window.location.href = '/';
-              }
-            </script>
-            <p>Authentication successful. This window should close automatically.</p>
-          </body>
-        </html>
-      `);
-    } catch (error) {
-      console.error("Auth callback error:", error);
-      res.status(500).send("Authentication failed: " + (error instanceof Error ? error.message : String(error)));
-    }
-  });
-
-  // API: Add Event
-  app.post("/api/calendar/event", async (req, res) => {
-    const { summary, start, end } = req.body;
-    console.log("Adding event request body:", req.body);
-    
-    try {
-      if (!oauth2Client.credentials.access_token) {
-        return res.status(401).json({ error: "Not authenticated" });
-      }
-      
-      const calendar = google.calendar({ version: "v3", auth: oauth2Client });
-      
-      // For all-day events, Google Calendar API expects 'date' (YYYY-MM-DD) instead of 'dateTime'.
-      // Also, the end date must be exclusive (the day after the start date).
-      const startDate = new Date(start);
-      const endDate = new Date(end || start);
-      endDate.setDate(endDate.getDate() + 1); // Make end date exclusive
-      
-      const startStr = startDate.toISOString().split('T')[0];
-      const endStr = endDate.toISOString().split('T')[0];
-      
-      const event = await calendar.events.insert({
-        calendarId: "primary",
-        requestBody: {
-          summary,
-          start: { date: startStr },
-          end: { date: endStr },
-          reminders: {
-            useDefault: false,
-            overrides: [
-              { method: 'popup', minutes: -480 }, // 8:00 AM on the day of the event (all-day events start at 00:00)
-            ],
-          },
-        },
-      });
-      res.json(event.data);
-    } catch (error) {
-      console.error("Failed to add event:", error);
-      // Log the full error object to see the Gaxios error details
-      console.error("Full error object:", JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
-      
-      res.status(500).json({ error: "Failed to add event: " + (error instanceof Error ? error.message : String(error)) });
     }
   });
 

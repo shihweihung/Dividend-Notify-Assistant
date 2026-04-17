@@ -1,5 +1,5 @@
 {
-  "name": "台股股息小幫手",
-  "description": "整理台股個股及ETF的除息日、發放日與金額，並整合至行事曆檢視。",
+  "name": "息引力",
+  "description": "最優雅的台股股息追蹤與提醒工具，幫您精準抓取除息日與發放日。",
   "requestFramePermissions": []
 }

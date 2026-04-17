@@ -20,7 +20,9 @@ import {
   Settings,
   ChevronDown,
   ChevronUp,
-  PieChart
+  PieChart,
+  BellRing,
+  Send
 } from 'lucide-react';
 import { 
   PieChart as RechartsPieChart, 
@@ -107,7 +109,6 @@ function MainApp() {
   const [manualExDate, setManualExDate] = useState('');
   const [manualPayDate, setManualPayDate] = useState('');
   const [manualPrice, setManualPrice] = useState('');
-  const [isSyncing, setIsSyncing] = useState(false);
   const [expandedEtf, setExpandedEtf] = useState<Set<string>>(new Set());
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
     typeof Notification !== 'undefined' ? Notification.permission : 'default'
@@ -116,86 +117,7 @@ function MainApp() {
     const saved = localStorage.getItem('dividend_dark_mode');
     return saved === 'true';
   });
-
-  const handleSyncToCalendar = async (stock: StockEntry) => {
-    if (!stock.dividendInfo?.exDividendDate && !stock.dividendInfo?.paymentDate) return;
-    
-    setIsSyncing(true);
-    try {
-      const response = await fetch('/api/auth/url');
-      const { url } = await response.json();
-      
-      const authWindow = window.open(url, 'oauth_popup', 'width=600,height=700');
-      
-      const handleMessage = async (event: MessageEvent) => {
-        if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-          window.removeEventListener('message', handleMessage);
-          
-          try {
-            const syncPromises = [];
-            
-            // 1. 同步除息日 (Ex-dividend date)
-            if (stock.dividendInfo?.exDividendDate) {
-              syncPromises.push(
-                fetch('/api/calendar/event', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    summary: `除息日: ${stock.name}`,
-                    start: stock.dividendInfo.exDividendDate,
-                    end: stock.dividendInfo.exDividendDate
-                  })
-                }).then(async res => {
-                  if (!res.ok) {
-                    const errorData = await res.json();
-                    throw new Error(errorData.error || '除息日同步失敗');
-                  }
-                })
-              );
-            }
-            
-            // 2. 同步領息日 (Payment date)
-            if (stock.dividendInfo?.paymentDate) {
-              syncPromises.push(
-                fetch('/api/calendar/event', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    summary: `領息日: ${stock.name}`,
-                    start: stock.dividendInfo.paymentDate,
-                    end: stock.dividendInfo.paymentDate
-                  })
-                }).then(async res => {
-                  if (!res.ok) {
-                    const errorData = await res.json();
-                    throw new Error(errorData.error || '領息日同步失敗');
-                  }
-                })
-              );
-            }
-            
-            if (syncPromises.length === 0) {
-              throw new Error('沒有除息日或領息日資料可供同步');
-            }
-            
-            await Promise.all(syncPromises);
-            
-            alert('已成功將日期同步至 Google 行事曆');
-          } catch (err) {
-            console.error('Sync error:', err);
-            alert(`同步失敗: ${err instanceof Error ? err.message : '未知錯誤'}`);
-          }
-        }
-      };
-      
-      window.addEventListener('message', handleMessage);
-    } catch (error) {
-      console.error(error);
-      alert('同步失敗');
-    } finally {
-      setIsSyncing(false);
-    }
-  };
+  const [isOverviewExpanded, setIsOverviewExpanded] = useState(true);
 
   // Notification Helpers
   const requestNotificationPermission = async () => {
@@ -203,18 +125,18 @@ function MainApp() {
     const permission = await Notification.requestPermission();
     setNotificationPermission(permission);
     if (permission === 'granted') {
-      new Notification('股息小幫手', {
-        body: '通知功能已開啟！當有除息或領息事件時，我們會提醒您。',
-        icon: '/favicon.ico'
+      new Notification('息引力：通知已開啟', {
+        body: '太棒了！當有除息或領息事件時，我們會準時提醒您。',
+        icon: '/favicon.svg'
       });
     }
   };
 
   const testNotification = () => {
     if (notificationPermission === 'granted') {
-      new Notification('測試通知', {
-        body: '這是一則測試通知，表示您的通知功能運作正常。',
-        icon: '/favicon.ico'
+      new Notification('息引力通知測試', {
+        body: '這是一則系統測試通知，代表您的功能運作正常。未來會在當天早上 8:00 提醒您。',
+        icon: '/favicon.svg'
       });
     } else {
       requestNotificationPermission();
@@ -786,26 +708,27 @@ function MainApp() {
     let pending = 0;
     let total = 0;
     const distribution: Record<string, number> = {};
-    const monthlyTotals = Array(12).fill(0);
+    const monthlyReceivedTotals = Array(12).fill(0);
+    const monthlyPendingTotals = Array(12).fill(0);
+    const monthlyBreakdown: { symbol: string; amount: number; isPending: boolean }[][] = Array.from({ length: 12 }, () => []);
 
     stocks.forEach(stock => {
       if (stock.dividendInfo && stock.shares > 0) {
         let stockTotal = 0;
         const info = stock.dividendInfo;
+        const symbol = stock.symbol;
         
         // Use manual adjustment if available
         if (stock.manualDividendAdjustment !== undefined && stock.manualDividendAdjustment !== null) {
           const amount = stock.manualDividendAdjustment;
           total += amount;
-          // Manual adjustment is usually for dividends already received or specifically known
           received += amount; 
           stockTotal = amount;
           
-          // For manual adjustment, we'll put it in the current month for the chart
           const currentMonthIdx = new Date().getMonth();
-          monthlyTotals[currentMonthIdx] += amount;
+          monthlyReceivedTotals[currentMonthIdx] += amount;
+          monthlyBreakdown[currentMonthIdx].push({ symbol, amount, isPending: false });
         } else {
-          // Support both old (2026) and new (CurrentYear) field names during transition
           const rAmount = ((info as any).receivedAmountCurrentYear || (info as any).receivedAmount2026 || 0) * stock.shares;
           const pAmount = ((info as any).pendingAmountCurrentYear || (info as any).pendingAmount2026 || 0) * stock.shares;
           
@@ -814,19 +737,41 @@ function MainApp() {
           total += (rAmount + pAmount);
           stockTotal = rAmount + pAmount;
 
-          // Monthly totals from AI distribution
           if (info.monthlyDistribution && Array.isArray(info.monthlyDistribution)) {
             info.monthlyDistribution.forEach((monthlyAmount, monthIdx) => {
-              if (monthIdx < 12) {
-                monthlyTotals[monthIdx] += monthlyAmount * stock.shares;
+              if (monthIdx < 12 && monthlyAmount > 0) {
+                const val = monthlyAmount * stock.shares;
+                monthlyReceivedTotals[monthIdx] += val;
+                monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: false });
               }
             });
-          } else if (info.paymentDate) {
-            // Fallback to single payment date if monthlyDistribution is missing
-            const pDate = parseISO(info.paymentDate);
-            if (pDate.getFullYear() === currentYear) {
+          }
+
+          if (info.pendingMonthlyDistribution && Array.isArray(info.pendingMonthlyDistribution)) {
+            info.pendingMonthlyDistribution.forEach((monthlyAmount, monthIdx) => {
+              if (monthIdx < 12 && monthlyAmount > 0) {
+                const val = monthlyAmount * stock.shares;
+                monthlyPendingTotals[monthIdx] += val;
+                monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: true });
+              }
+            });
+          }
+
+          if ((!info.monthlyDistribution || !info.monthlyDistribution.some(v => v > 0)) && 
+              (!info.pendingMonthlyDistribution || !info.pendingMonthlyDistribution.some(v => v > 0)) && 
+              (info.paymentDate || info.exDividendDate)) {
+            const dateStr = info.paymentDate || info.exDividendDate;
+            const pDate = parseISO(dateStr);
+            if (!isNaN(pDate.getTime()) && pDate.getFullYear() === currentYear) {
               const month = pDate.getMonth();
-              monthlyTotals[month] += info.amount * stock.shares;
+              const val = info.amount * stock.shares;
+              if (dateStr <= format(today, 'yyyy-MM-dd')) {
+                monthlyReceivedTotals[month] += val;
+                monthlyBreakdown[month].push({ symbol, amount: val, isPending: false });
+              } else {
+                monthlyPendingTotals[month] += val;
+                monthlyBreakdown[month].push({ symbol, amount: val, isPending: true });
+              }
             }
           }
         }
@@ -838,14 +783,20 @@ function MainApp() {
       }
     });
 
-    const distributionData = Object.entries(distribution)
-      .map(([name, value]) => ({ name, value }))
-      .filter(item => item.value > 0)
+    const distributionData = [...Object.entries(distribution)
+      .map(([name, value]) => {
+        // Try to find the symbol for this name
+        const stock = stocks.find(s => s.name === name);
+        return { name: stock ? stock.symbol : name, value };
+      })
+      .filter(item => item.value > 0)]
       .sort((a, b) => b.value - a.value);
 
-    const monthlyData = monthlyTotals.map((amount, index) => ({
+    const monthlyData = monthlyReceivedTotals.map((amount, index) => ({
       month: `${index + 1}月`,
-      amount: Math.round(amount)
+      amount: Math.round(amount),
+      pendingAmount: Math.round(monthlyPendingTotals[index]),
+      breakdown: monthlyBreakdown[index].sort((a, b) => b.amount - a.amount)
     }));
 
     return { received, pending, total, distributionData, monthlyData };
@@ -865,7 +816,7 @@ function MainApp() {
       }
     });
 
-    const rawAllocationData = stocks.map(stock => {
+    const rawAllocationData = [...stocks.map(stock => {
       const marketValue = (stock.dividendInfo?.currentPrice || 0) * stock.shares;
       return {
         name: stock.symbol,
@@ -874,7 +825,7 @@ function MainApp() {
         percentage: totalValue > 0 ? (marketValue / totalValue) * 100 : 0,
         yield: stock.dividendInfo?.yield || 0
       };
-    }).filter(item => item.value > 0).sort((a, b) => b.value - a.value);
+    }).filter(item => item.value > 0)].sort((a, b) => b.value - a.value);
 
     const topN = rawAllocationData.slice(0, componentLimit);
     const others = rawAllocationData.slice(componentLimit);
@@ -962,7 +913,7 @@ function MainApp() {
               <div>
                 <h1 className="text-lg font-black tracking-tight text-indigo-500 flex items-center gap-2">
                   <TrendingUp className="w-5 h-5" />
-                  股息小幫手
+                  息引力
                 </h1>
               </div>
               <div className="flex gap-2 items-center relative">
@@ -1099,7 +1050,7 @@ function MainApp() {
                                     className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] font-bold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm active:scale-95"
                                   >
                                     <AlertCircle className="w-4 h-4" />
-                                    <span>開啟桌面通知</span>
+                                    <span>開啟系統通知</span>
                                   </button>
                                 ) : (
                                   <div className={cn(
@@ -1107,22 +1058,25 @@ function MainApp() {
                                     darkMode ? "bg-slate-800/50 border-slate-700" : "bg-slate-50 border-slate-100"
                                   )}>
                                     <div className="flex items-center gap-2">
-                                      <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                                      <span className="text-[11px] font-bold text-emerald-500">通知功能已啟用</span>
+                                      <BellRing className="w-3.5 h-3.5 text-emerald-500" />
+                                      <span className="text-[11px] font-bold text-emerald-500">股息通知已就緒</span>
                                     </div>
                                     <button
                                       onClick={testNotification}
                                       className={cn(
-                                        "px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors",
+                                        "flex items-center gap-1.5 px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all active:scale-95",
                                         darkMode ? "bg-slate-700 text-slate-300 hover:bg-slate-600" : "bg-white text-slate-500 hover:bg-slate-100 border border-slate-200"
                                       )}
                                     >
-                                      測試
+                                      <Send className="w-3 h-3" />
+                                      <span>發送測試</span>
                                     </button>
                                   </div>
                                 )}
-                                <p className="text-[10px] opacity-60 leading-relaxed px-1">
-                                  開啟後，若當天有除息或領息事件，系統將於早上 8:00 自動彈出提醒。
+                                <p className="text-[10px] opacity-70 leading-relaxed px-1 mt-1">
+                                  開啟後，當天 8:00 若有除息或領息事件會自動彈出提醒。
+                                  <br />
+                                  <span className="text-indigo-400 font-bold">💡 手機小撇步：</span> 將此網頁「加入主畫面」(PWA)，通知功能會更準確且支援背景推播。
                                 </p>
                               </div>
                             </div>
@@ -1208,26 +1162,33 @@ function MainApp() {
           "p-4 rounded-2xl shadow-sm border transition-colors flex flex-col",
           darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
         )}>
-          <div className="flex justify-between items-center mb-2 shrink-0">
-            <div className="flex flex-col">
+          <button 
+            onClick={() => setIsOverviewExpanded(!isOverviewExpanded)}
+            className="flex justify-between items-center mb-2 shrink-0 group"
+          >
+            <div className="flex flex-col text-left">
               <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>{new Date().getFullYear()} 股息概況</h2>
-              <p className="text-[8px] text-slate-500 font-medium leading-tight">
-                註：未來月份若未公佈配息則顯示為 0。
-              </p>
+              <p className="text-[10px] text-slate-500 font-bold">點擊{isOverviewExpanded ? '收合' : '展開'}詳細分析</p>
             </div>
-            <div className="flex gap-4">
-              <p className={cn("text-[10px] sm:text-xs font-bold", darkMode ? "text-slate-400" : "text-slate-500")}>
-                已領: <span className="text-emerald-500">${dividendStats.received.toLocaleString()}</span>
-              </p>
-              <p className={cn("text-[10px] sm:text-xs font-bold", darkMode ? "text-slate-400" : "text-slate-500")}>
-                未領: <span className="text-amber-500">${dividendStats.pending.toLocaleString()}</span>
-              </p>
+            <div className={cn(
+              "p-1.5 rounded-lg transition-colors",
+              darkMode ? "bg-slate-700 text-slate-300 group-hover:bg-slate-600" : "bg-slate-100 text-slate-500 group-hover:bg-slate-200"
+            )}>
+              {isOverviewExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </div>
-          </div>
+          </button>
           
-          <div className="grid grid-cols-2 gap-2 sm:gap-8">
-            {/* Pie Chart with Legend */}
-            <div className="h-44 sm:h-64 flex flex-col">
+          <AnimatePresence>
+            {isOverviewExpanded && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden"
+              >
+                <div className="flex flex-col md:flex-row gap-4 items-center pt-2">
+                  {/* Pie Chart with Top 1 Focus */}
+                  <div className="h-64 flex flex-col w-full md:w-1/2 relative">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsPieChart margin={{ top: 5, right: 5, left: 5, bottom: 5 }}>
                   <Pie
@@ -1235,9 +1196,9 @@ function MainApp() {
                     dataKey="value"
                     nameKey="name"
                     cx="50%"
-                    cy="45%"
-                    innerRadius="30%"
-                    outerRadius="60%"
+                    cy="50%"
+                    innerRadius="60%"
+                    outerRadius="80%"
                     paddingAngle={2}
                     label={false}
                   >
@@ -1245,92 +1206,146 @@ function MainApp() {
                       <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
+                  <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle" className={cn("text-[10px] font-bold", darkMode ? "fill-slate-400" : "fill-slate-600")}>
+                    <tspan x="50%" dy="-0.5em">預計總額</tspan>
+                    <tspan x="50%" dy="1.2em" className={cn("text-[14px] font-black", darkMode ? "fill-slate-100" : "fill-slate-900")}>
+                      ${dividendStats.total.toLocaleString()}
+                    </tspan>
+                  </text>
                   <RechartsTooltip 
                     formatter={(value: number, name: string) => [`$${value.toLocaleString()}`, name]}
                     contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', fontSize: '10px' }}
                   />
-                  <Legend 
-                    layout="horizontal" 
-                    align="center" 
-                    verticalAlign="bottom"
-                    iconType="circle"
-                    iconSize={4}
-                    wrapperStyle={{ paddingTop: '10px' }}
-                    formatter={(value: string) => (
-                      <span className={cn(
-                        "text-[8px] sm:text-[10px] font-bold truncate inline-block max-w-[50px] sm:max-w-[100px] align-middle",
-                        darkMode ? "text-slate-400" : "text-slate-600"
-                      )}>
-                        {value}
-                      </span>
-                    )}
-                  />
                 </RechartsPieChart>
               </ResponsiveContainer>
             </div>
-
-            {/* Monthly Bar Chart */}
-            <div className={cn("pl-2 sm:pl-8 border-l flex flex-col h-44 sm:h-64", darkMode ? "border-slate-700" : "border-slate-100")}>
-              <h3 className={cn("text-[9px] sm:text-[10px] font-bold mb-1 uppercase tracking-wider shrink-0", darkMode ? "text-slate-500" : "text-slate-400")}>每月股息</h3>
-              <div className="flex-1 min-h-0">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={dividendStats.monthlyData} margin={{ top: 15, right: 0, left: 0, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={darkMode ? "#334155" : "#e2e8f0"} />
-                    <XAxis 
-                      dataKey="month" 
-                      axisLine={false} 
-                      tickLine={false} 
-                      interval={0}
-                      tick={(props) => {
-                        const { x, y, payload } = props;
-                        // On very small screens, show every other month
-                        const isSmall = typeof window !== 'undefined' && window.innerWidth < 400;
-                        if (isSmall && parseInt(payload.value) % 2 === 0) return null;
-                        
-                        return (
-                          <text x={x} y={y} dy={10} textAnchor="middle" fontSize={window.innerWidth > 640 ? 10 : 8} fontWeight={700} fill={darkMode ? "#94a3b8" : "#64748b"}>
-                            {payload.value}
-                          </text>
-                        );
-                      }}
-                    />
-                    <YAxis 
-                      hide
-                    />
-                    <RechartsTooltip 
-                      cursor={{ fill: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.02)' }}
-                      content={({ active, payload }) => {
-                        if (active && payload && payload.length) {
-                          return (
-                            <div className={cn(
-                              "px-3 py-2 rounded-xl shadow-xl border text-[10px] font-bold",
-                              darkMode ? "bg-slate-900 border-slate-800 text-slate-200" : "bg-white border-slate-100 text-slate-700"
-                            )}>
-                              <p className="mb-1 opacity-50">{payload[0].payload.month}</p>
-                              <p className="text-emerald-500">股息: ${Number(payload[0].value).toLocaleString()}</p>
-                            </div>
-                          );
-                        }
-                        return null;
-                      }}
-                    />
-                    <Bar dataKey="amount" fill="#10b981" radius={[2, 2, 0, 0]}>
-                      <LabelList 
-                        dataKey="amount" 
-                        position="top" 
-                        formatter={(v: number) => v > 0 ? `${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v}` : ''} 
-                        style={{ fontSize: 7, fontWeight: 800, fill: darkMode ? '#10b981' : '#059669' }} 
-                      />
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+            
+            {/* Legend as List View - Moved to the right */}
+            <div className="w-full md:w-1/2 space-y-1.5 overflow-y-auto max-h-[160px] pr-2 custom-scrollbar">
+              {dividendStats.distributionData.map((entry, index) => (
+                <div key={entry.name} className="flex items-center justify-between text-[10px] py-0.5 border-b border-slate-100 dark:border-slate-800/50 last:border-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                    <span className={cn("font-bold truncate", darkMode ? "text-slate-300" : "text-slate-700")}>{entry.name}</span>
+                  </div>
+                  <span className={cn("font-mono font-bold shrink-0 ml-2", darkMode ? "text-slate-100" : "text-slate-900")}>${entry.value.toLocaleString()}</span>
+                </div>
+              ))}
             </div>
           </div>
-        </div>
 
-        {/* Add Stock Form - Compact */}
-        <AnimatePresence>
+            {/* Monthly Bar Chart */}
+            <div className={cn("pt-6 flex flex-col h-64 w-full border-t mt-4", darkMode ? "border-slate-700" : "border-slate-100")}>
+              <h3 className={cn("text-[9px] sm:text-[10px] font-bold mb-1 uppercase tracking-wider shrink-0", darkMode ? "text-slate-500" : "text-slate-400")}>每月股息</h3>
+              <div className="flex-1 min-h-0 relative">
+                {dividendStats.monthlyData.some(d => d.amount > 0 || d.pendingAmount > 0) ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={dividendStats.monthlyData} margin={{ top: 15, right: 10, left: -10, bottom: 0 }}>
+                      <XAxis 
+                        dataKey="month" 
+                        axisLine={false} 
+                        tickLine={false} 
+                        interval={0}
+                        tick={(props) => {
+                          const { x, y, payload } = props;
+                          const monthNum = parseInt(payload.value);
+                          const isCurrentMonth = monthNum === (new Date().getMonth() + 1);
+                          return (
+                            <text 
+                              x={x} 
+                              y={y} 
+                              dy={10} 
+                              textAnchor="middle" 
+                              fontSize={9} 
+                              fontWeight={isCurrentMonth ? 900 : 700} 
+                              fill={isCurrentMonth ? "#10b981" : (darkMode ? "#94a3b8" : "#64748b")}
+                            >
+                              {payload.value}
+                            </text>
+                          );
+                        }}
+                      />
+                      <YAxis 
+                        hide={false} 
+                        tick={{ fontSize: 8, fill: darkMode ? '#94a3b8' : '#64748b' }}
+                        axisLine={false}
+                        tickLine={false}
+                        width={30}
+                        tickFormatter={(value) => value >= 1000 ? `${(value/1000).toFixed(0)}k` : value}
+                      />
+                      <RechartsTooltip 
+                        cursor={{ fill: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.02)' }}
+                        content={({ active, payload }) => {
+                          if (active && payload && payload.length) {
+                            const data = payload[0].payload;
+                            return (
+                              <div className={cn(
+                                "px-3 py-2 rounded-xl shadow-xl border text-[10px] font-bold z-50",
+                                darkMode ? "bg-slate-900 border-slate-800 text-slate-200" : "bg-white border-slate-100 text-slate-700"
+                              )}>
+                                <p className="mb-2 opacity-100 border-b pb-1 border-slate-100 dark:border-slate-800 flex justify-between">
+                                  <span>{data.month} 股息明細</span>
+                                  <span className="opacity-50 font-normal">總計: ${(data.amount + data.pendingAmount).toLocaleString()}</span>
+                                </p>
+                                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                                  {data.breakdown && data.breakdown.map((item: any, idx: number) => (
+                                    <div key={idx} className="flex justify-between items-center gap-4">
+                                      <div className="flex items-center gap-1.5">
+                                        <div className={cn(
+                                          "w-1 h-1 rounded-full",
+                                          item.isPending ? "bg-amber-500" : "bg-emerald-500"
+                                        )} />
+                                        <span className="opacity-70">{item.symbol}</span>
+                                      </div>
+                                      <span className={cn(
+                                        "font-mono",
+                                        item.isPending ? "text-amber-500" : "text-emerald-500"
+                                      )}>+${Math.round(item.amount).toLocaleString()}</span>
+                                    </div>
+                                  ))}
+                                  {(!data.breakdown || data.breakdown.length === 0) && (
+                                    <p className="text-slate-500 py-1 font-normal italic">此月份無資料</p>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          }
+                          return null;
+                        }}
+                      />
+                      <Bar dataKey="amount" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]}>
+                        <LabelList 
+                          dataKey="amount" 
+                          position="top" 
+                          formatter={(v: number) => v > 0 ? `${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v}` : ''} 
+                          style={{ fontSize: 7, fontWeight: 800, fill: darkMode ? '#10b981' : '#059669' }} 
+                        />
+                      </Bar>
+                      <Bar dataKey="pendingAmount" stackId="a" fill="#f59e0b" radius={[2, 2, 0, 0]}>
+                        <LabelList 
+                          dataKey="pendingAmount" 
+                          position="top" 
+                          formatter={(v: number) => v > 0 ? `${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v}` : ''} 
+                          style={{ fontSize: 7, fontWeight: 800, fill: darkMode ? '#f59e0b' : '#d97706' }} 
+                        />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                    <TrendingUp className="w-8 h-8 mb-2 opacity-20" />
+                    <p className="text-[10px] opacity-50">尚無今年股息分佈資料</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+          
+      {/* Add Stock Form - Compact */}
+      <AnimatePresence>
           {showAddForm && (
             <motion.div 
               initial={{ height: 0, opacity: 0 }}
@@ -1589,7 +1604,7 @@ function MainApp() {
               {/* Event List - Compact */}
               <div className="space-y-2">
                 <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest px-1">本月行程</h3>
-                {calendarEvents
+                {[...calendarEvents]
                   .filter(e => isSameMonth(e.date, currentMonth))
                   .sort((a, b) => a.date.getTime() - b.date.getTime())
                   .map((event, idx) => (
@@ -1670,7 +1685,7 @@ function MainApp() {
                           )}
                           {stock.dividendInfo?.updatedAt && (
                             <div className="text-[8px] text-slate-500 font-medium flex items-center gap-1 flex-wrap">
-                              <span>更新於: {new Date(stock.dividendInfo.updatedAt).toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+                              <span>更新於: {new Date(stock.dividendInfo.updatedAt).toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</span>
                               {stock.dividendInfo.source && (
                                 <span>
                                   (來源: {stock.dividendInfo.sourceUrl ? (
@@ -1685,17 +1700,6 @@ function MainApp() {
                         </div>
                       </div>
                       <div className="flex gap-1 items-center shrink-0">
-                        <button
-                          onClick={() => handleRefreshStock(stock)}
-                          disabled={refreshingStocks.has(stock.symbol)}
-                          className={cn(
-                            "p-1.5 rounded-lg transition-colors",
-                            darkMode ? "hover:bg-slate-800 text-slate-500" : "hover:bg-slate-100 text-slate-400"
-                          )}
-                          title="重新整理此股票"
-                        >
-                          <RefreshCw className={cn("w-3.5 h-3.5", refreshingStocks.has(stock.symbol) && "animate-spin")} />
-                        </button>
                         {stock.dividendInfo?.isEtf && (
                           <button 
                             onClick={() => toggleEtfExpansion(stock.symbol)}
@@ -1713,20 +1717,16 @@ function MainApp() {
                             {expandedEtf.has(stock.symbol) ? <ChevronUp className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
                           </button>
                         )}
-                        <button 
-                          onClick={() => {
-                            console.log('Sync button clicked for:', stock.symbol);
-                            handleSyncToCalendar(stock);
-                          }}
-                          disabled={isSyncing || (!stock.dividendInfo?.exDividendDate && !stock.dividendInfo?.paymentDate)}
+                        <button
+                          onClick={() => handleRefreshStock(stock)}
+                          disabled={refreshingStocks.has(stock.symbol)}
                           className={cn(
-                            "p-1.5 rounded-lg transition-colors relative z-10",
-                            darkMode ? "text-slate-400 hover:bg-slate-800" : "text-slate-400 hover:bg-slate-100",
-                            (isSyncing || (!stock.dividendInfo?.exDividendDate && !stock.dividendInfo?.paymentDate)) && "opacity-50 cursor-not-allowed"
+                            "p-1.5 rounded-lg transition-colors",
+                            darkMode ? "hover:bg-slate-800 text-slate-500" : "hover:bg-slate-100 text-slate-400"
                           )}
-                          title={(!stock.dividendInfo?.exDividendDate && !stock.dividendInfo?.paymentDate) ? "無日期資料可同步" : "同步至行事曆"}
+                          title="重新整理此股票"
                         >
-                          <CalendarIcon className="w-3.5 h-3.5" />
+                          <RefreshCw className={cn("w-3.5 h-3.5", refreshingStocks.has(stock.symbol) && "animate-spin")} />
                         </button>
                         <button 
                           onClick={() => handleRemoveStock(stock.symbol)}
@@ -1777,7 +1777,20 @@ function MainApp() {
                                 "p-2 rounded-xl mb-2 space-y-1.5",
                                 darkMode ? "bg-slate-800/50" : "bg-slate-50/50"
                               )}>
-                                <p className="text-[8px] font-black text-indigo-500 uppercase tracking-wider px-1">前十大成分股</p>
+                                <div className="flex justify-between items-center px-1 mb-1">
+                                  <p className="text-[8px] font-black text-indigo-500 uppercase tracking-wider">前十大成分股</p>
+                                  <button
+                                    onClick={() => handleRefreshStock(stock)}
+                                    disabled={refreshingStocks.has(stock.symbol)}
+                                    className={cn(
+                                      "p-1 rounded-lg transition-colors",
+                                      darkMode ? "hover:bg-slate-700 text-indigo-400" : "hover:bg-slate-200 text-indigo-600"
+                                    )}
+                                    title="重新載入成分股"
+                                  >
+                                    <RefreshCw className={cn("w-3 h-3", refreshingStocks.has(stock.symbol) && "animate-spin")} />
+                                  </button>
+                                </div>
                                 {stock.dividendInfo.topComponents && stock.dividendInfo.topComponents.length > 0 ? (
                                   stock.dividendInfo.topComponents.map((comp, idx) => (
                                     <div key={idx} className="flex justify-between items-center px-1">
@@ -1939,10 +1952,19 @@ function MainApp() {
                             <p className="text-[8px] font-bold text-indigo-400 uppercase">
                               {stock.manualDividendAdjustment !== null && stock.manualDividendAdjustment !== undefined ? '手動股息' : '本次預計領取'}
                             </p>
-                            <p className="text-xs font-black text-indigo-500">
-                              ${((stock.manualDividendAdjustment !== null && stock.manualDividendAdjustment !== undefined)
-                                ? stock.manualDividendAdjustment 
-                                : (stock.dividendInfo.amount * stock.shares)).toLocaleString()}
+                            <p className={cn(
+                              "text-xs font-black",
+                              (stock.manualDividendAdjustment === null || stock.manualDividendAdjustment === undefined) && !stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString())
+                                ? "text-slate-400 text-[10px]"
+                                : "text-indigo-500"
+                            )}>
+                              {stock.manualDividendAdjustment !== null && stock.manualDividendAdjustment !== undefined ? (
+                                `$${stock.manualDividendAdjustment.toLocaleString()}`
+                              ) : (
+                                stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString()) 
+                                  ? `$${(stock.dividendInfo.amount * stock.shares).toLocaleString()}`
+                                  : '尚未公佈'
+                              )}
                             </p>
                           </div>
                         </div>
@@ -1984,9 +2006,9 @@ function MainApp() {
           "p-4 rounded-2xl shadow-sm border transition-colors flex flex-col",
           darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
         )}>
-          <div className="flex justify-between items-center mb-4 shrink-0">
-            <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>庫存分佈</h2>
+          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-4 shrink-0 gap-2">
             <div className="flex items-center gap-2">
+              <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>庫存分佈</h2>
               <select
                 value={componentLimit}
                 onChange={(e) => setComponentLimit(Number(e.target.value))}
@@ -1999,25 +2021,25 @@ function MainApp() {
                 <option value={10}>Top 10</option>
                 <option value={20}>Top 20</option>
               </select>
-              <p className={cn("text-xs font-bold", darkMode ? "text-slate-400" : "text-slate-500")}>
-                平均殖利率: <span className="text-emerald-500 mr-2">{portfolioData.totalWeightedYield.toFixed(2)}%</span>
-                總現值: <span className="text-indigo-500">${portfolioData.totalValue.toLocaleString()}</span>
-              </p>
             </div>
+            <p className={cn("text-[10px] sm:text-xs font-bold", darkMode ? "text-slate-400" : "text-slate-500")}>
+              平均殖利率: <span className="text-emerald-500 mr-2">{portfolioData.totalWeightedYield.toFixed(2)}%</span>
+              總現值: <span className="text-indigo-500">${portfolioData.totalValue.toLocaleString()}</span>
+            </p>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-1">
             {portfolioData.allocationData.map((item, index) => (
-              <div key={index} className="flex justify-between items-center text-[11px] py-1 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
+              <div key={index} className="flex justify-between items-center text-[10px] sm:text-[11px] py-1 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
                 <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                  <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
                   <span className={cn("font-bold truncate", darkMode ? "text-slate-300" : "text-slate-700")}>
                     {item.fullName}
                   </span>
                 </div>
-                <div className="flex items-center gap-4 font-mono shrink-0 ml-4">
-                  <span className="text-emerald-500 font-bold w-12 text-right">{item.yield.toFixed(1)}%</span>
-                  <span className="text-indigo-500 font-bold w-20 text-right">${item.value.toLocaleString()}</span>
-                  <span className={cn("w-12 text-right font-bold", darkMode ? "text-slate-500" : "text-slate-400")}>
+                <div className="flex items-center gap-2 sm:gap-4 font-mono shrink-0 ml-2 sm:ml-4">
+                  <span className="text-emerald-500 font-bold w-10 sm:w-12 text-right">{item.yield.toFixed(1)}%</span>
+                  <span className="text-indigo-500 font-bold w-16 sm:w-20 text-right">${item.value.toLocaleString()}</span>
+                  <span className={cn("w-10 sm:w-12 text-right font-bold", darkMode ? "text-slate-500" : "text-slate-400")}>
                     {item.percentage.toFixed(1)}%
                   </span>
                 </div>
@@ -2026,8 +2048,6 @@ function MainApp() {
           </div>
         </div>
       </main>
-    </div>
-
       <style>{`
         .custom-scrollbar::-webkit-scrollbar {
           width: 4px;
@@ -2043,6 +2063,7 @@ function MainApp() {
           background: ${darkMode ? '#475569' : '#CBD5E1'};
         }
       `}</style>
+      </div>
     </div>
   );
 }
