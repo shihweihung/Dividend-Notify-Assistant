@@ -1779,17 +1779,6 @@ function MainApp() {
                               )}>
                                 <div className="flex justify-between items-center px-1 mb-1">
                                   <p className="text-[8px] font-black text-indigo-500 uppercase tracking-wider">前十大成分股</p>
-                                  <button
-                                    onClick={() => handleRefreshStock(stock)}
-                                    disabled={refreshingStocks.has(stock.symbol)}
-                                    className={cn(
-                                      "p-1 rounded-lg transition-colors",
-                                      darkMode ? "hover:bg-slate-700 text-indigo-400" : "hover:bg-slate-200 text-indigo-600"
-                                    )}
-                                    title="重新載入成分股"
-                                  >
-                                    <RefreshCw className={cn("w-3 h-3", refreshingStocks.has(stock.symbol) && "animate-spin")} />
-                                  </button>
                                 </div>
                                 {stock.dividendInfo.topComponents && stock.dividendInfo.topComponents.length > 0 ? (
                                   stock.dividendInfo.topComponents.map((comp, idx) => (
