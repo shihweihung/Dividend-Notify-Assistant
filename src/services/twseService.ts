@@ -62,7 +62,13 @@ async function fetchDividendFromYahoo(symbol: string, isOtc: boolean): Promise<{
     console.log(`[Yahoo] 正在抓取除權息資料: ${url}`);
     
     const res = await axios.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://tw.stock.yahoo.com/',
+        'Cache-Control': 'max-age=0'
+      },
       timeout: 10000
     });
 
@@ -116,8 +122,8 @@ async function fetchDividendFromYahoo(symbol: string, isOtc: boolean): Promise<{
       amount,
       paymentDate: paymentDate === '-' ? "" : paymentDate
     };
-  } catch (error) {
-    console.error(`[Yahoo] 抓取 ${symbol} 失敗:`, error);
+  } catch (error: any) {
+    console.warn(`[Yahoo] 抓取 ${symbol} 失敗: ${error.message || error}`);
     return null;
   }
 }
@@ -189,7 +195,13 @@ export async function fetchPriceFromYahoo(symbol: string): Promise<{ price: numb
     try {
       const url = `https://tw.stock.yahoo.com/quote/${symbol}${suffix}`;
       const res = await axios.get(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+          'Referer': 'https://tw.stock.yahoo.com/',
+          'Cache-Control': 'max-age=0'
+        },
         timeout: 10000
       });
       const $ = cheerio.load(res.data);
@@ -223,8 +235,8 @@ export async function fetchPriceFromYahoo(symbol: string): Promise<{ price: numb
         
         return { price, name: name || "未知股票" };
       }
-    } catch (error) {
-      console.warn(`[Yahoo Price] 嘗試 ${symbol}${suffix} 失敗`);
+    } catch (error: any) {
+      console.warn(`[Yahoo Price] 嘗試 ${symbol}${suffix} 失敗: ${error.message || error}`);
     }
   }
   

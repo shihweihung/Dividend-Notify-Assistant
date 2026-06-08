@@ -22,7 +22,9 @@ import {
   ChevronUp,
   PieChart,
   BellRing,
-  Send
+  Send,
+  Download,
+  MessageSquare
 } from 'lucide-react';
 import { 
   PieChart as RechartsPieChart, 
@@ -113,33 +115,56 @@ function MainApp() {
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
     typeof Notification !== 'undefined' ? Notification.permission : 'default'
   );
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    const saved = localStorage.getItem('dividend_notifications_enabled');
+    return saved !== 'false'; // Defaults to true
+  });
   const [darkMode, setDarkMode] = useState(() => {
     const saved = localStorage.getItem('dividend_dark_mode');
     return saved === 'true';
   });
   const [isOverviewExpanded, setIsOverviewExpanded] = useState(true);
+  const [cash, setCash] = useState<number>(0);
+  const [isEditingCash, setIsEditingCash] = useState(false);
+  const [cashInput, setCashInput] = useState('');
+  const [telegramBotToken, setTelegramBotToken] = useState(() => {
+    return localStorage.getItem('telegram_bot_token') || '8242721109:AAERtesLIWGtwtCKKQRfDUxlEa8yBFt5sPM';
+  });
+  const [telegramChatId, setTelegramChatId] = useState(() => {
+    return localStorage.getItem('telegram_chat_id') || '7654975919';
+  });
+  const [isSendingTelegram, setIsSendingTelegram] = useState(false);
 
   // Notification Helpers
   const requestNotificationPermission = async () => {
     if (typeof Notification === 'undefined') return;
-    const permission = await Notification.requestPermission();
-    setNotificationPermission(permission);
-    if (permission === 'granted') {
-      new Notification('息引力：通知已開啟', {
-        body: '太棒了！當有除息或領息事件時，我們會準時提醒您。',
-        icon: '/favicon.svg'
-      });
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      if (permission === 'granted') {
+        new Notification('息引力：通知已開啟', {
+          body: '太棒了！當有除息或領息事件時，我們會準時提醒您。',
+          icon: '/favicon.svg'
+        });
+      }
+    } catch (e) {
+      console.warn('Notification permission request not allowed or failed:', e);
     }
   };
 
   const testNotification = () => {
-    if (notificationPermission === 'granted') {
-      new Notification('息引力通知測試', {
-        body: '這是一則系統測試通知，代表您的功能運作正常。未來會在當天早上 8:00 提醒您。',
-        icon: '/favicon.svg'
-      });
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      try {
+        new Notification('息引力通知測試', {
+          body: '這是一則系統測試通知，代表您的功能運作正常。未來會在當天早上 8:00 提醒您。',
+          icon: '/favicon.svg'
+        });
+        alert('🔔 系統通知已送出，請檢查您的桌面或系統通知！');
+      } catch (e) {
+        alert('🔔 預覽通知測試：您已啟用除息領息通知！\n\n（提示：由於在特定瀏覽器或 AI Studio 預覽環境中，「系統通知權限」可能受限，若您之後透過手機「加入主畫面」(PWA) 或在獨立分頁中開啟，體驗系統通知會更加完整喔！）');
+      }
     } else {
-      requestNotificationPermission();
+      alert('🔔 預覽通知測試：您已啟用除息領息通知！\n\n（提示：由於在特定瀏覽器或 AI Studio 預覽環境中，「系統通知權限」可能受限，若您之後透過手機「加入主畫面」(PWA) 或在獨立分頁中開啟，體驗系統通知會更加完整喔！）');
     }
   };
 
@@ -173,6 +198,11 @@ function MainApp() {
     }
   }, [darkMode]);
 
+  // Notifications Enabled State persistence
+  useEffect(() => {
+    localStorage.setItem('dividend_notifications_enabled', notificationsEnabled.toString());
+  }, [notificationsEnabled]);
+
   // Firestore Sync
   useEffect(() => {
     if (!isAuthReady) return;
@@ -196,6 +226,105 @@ function MainApp() {
       }
     }
   }, [user, isAuthReady]);
+
+  // Cash & Telegram Synced with Firestore or Local Storage
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    if (user) {
+      const userRef = doc(db, 'users', user.uid);
+      const unsubscribe = onSnapshot(userRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const userData = docSnap.data();
+          if (userData.cash !== undefined) {
+            setCash(Number(userData.cash));
+          } else {
+            setCash(0);
+          }
+          if (userData.telegramBotToken !== undefined && userData.telegramBotToken !== '') {
+            setTelegramBotToken(userData.telegramBotToken);
+          } else {
+            setTelegramBotToken('8242721109:AAERtesLIWGtwtCKKQRfDUxlEa8yBFt5sPM');
+          }
+          if (userData.telegramChatId !== undefined && userData.telegramChatId !== '') {
+            setTelegramChatId(userData.telegramChatId);
+          } else {
+            setTelegramChatId('7654975919');
+          }
+        }
+      }, (err) => {
+        handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
+      });
+
+      return () => unsubscribe();
+    } else {
+      const savedCash = localStorage.getItem('taiwan_cash');
+      if (savedCash) {
+        setCash(Number(savedCash));
+      } else {
+        setCash(0);
+      }
+      const savedBotToken = localStorage.getItem('telegram_bot_token');
+      const savedChatId = localStorage.getItem('telegram_chat_id');
+      setTelegramBotToken(savedBotToken || '8242721109:AAERtesLIWGtwtCKKQRfDUxlEa8yBFt5sPM');
+      setTelegramChatId(savedChatId || '7654975919');
+    }
+  }, [user, isAuthReady]);
+
+  // Synchronize Telegram Chat Data with server JSON Database
+  useEffect(() => {
+    if (telegramChatId && telegramBotToken) {
+      const syncChatData = async () => {
+        try {
+          await fetch('/api/telegram/save-chat-data', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              chatId: telegramChatId,
+              botToken: telegramBotToken,
+              cash: cash,
+              stocks: stocks,
+              username: user ? (user.displayName || user.email) : '投資大師'
+            })
+          });
+        } catch (e) {
+          console.error('Failed to sync Telegram chat data to backend:', e);
+        }
+      };
+
+      const timer = setTimeout(syncChatData, 1200);
+      return () => clearTimeout(timer);
+    }
+  }, [telegramChatId, telegramBotToken, cash, stocks, user]);
+
+  // Auto-Register Telegram Webhook in background to ensure it always points to the active dev/prod domain
+  useEffect(() => {
+    if (telegramBotToken) {
+      const registerWebhook = async () => {
+        try {
+          const response = await fetch('/api/telegram/register-webhook', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              botToken: telegramBotToken,
+              baseUrl: window.location.origin
+            })
+          });
+          const data = await response.json();
+          if (response.ok && data.success) {
+            console.log('🤖 Telegram Webhook automatically registered successfully:', data.description);
+          } else {
+            console.warn('Telegram Webhook registration issue on boot:', data.error);
+          }
+        } catch (err) {
+          console.error('Failed to auto-register Telegram webhook:', err);
+        }
+      };
+
+      const timer = setTimeout(registerWebhook, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [telegramBotToken]);
 
   // Migration
   useEffect(() => {
@@ -442,6 +571,20 @@ function MainApp() {
     }
   };
 
+  const handleUpdateCash = async (newCash: number) => {
+    setCash(newCash);
+    if (user) {
+      const userRef = doc(db, 'users', user.uid);
+      try {
+        await setDoc(userRef, { cash: newCash }, { merge: true });
+      } catch (err) {
+        handleFirestoreError(err as any, OperationType.WRITE, `users/${user.uid}/cash`);
+      }
+    } else {
+      localStorage.setItem('taiwan_cash', newCash.toString());
+    }
+  };
+
   const handleRefresh = async (symbol: string, forceApi: boolean = false) => {
     setRefreshingStocks(prev => new Set(prev).add(symbol));
     try {
@@ -518,6 +661,83 @@ function MainApp() {
         return next;
       });
     }
+  };
+
+  const handleExportCSV = () => {
+    // CSV Header row with BOM to support Microsoft Excel Traditional Chinese encoding properly
+    const headers = [
+      '股票代號',
+      '股票名稱',
+      '持有股數',
+      '目前現價',
+      '每股股利',
+      '已領股息',
+      '未領股息',
+      '預計領息總額',
+      '預估年收益率 (Yield %)',
+      '手動調整總額'
+    ];
+
+    const rows = stocks.map(stock => {
+      const symbol = stock.symbol;
+      const name = stock.name;
+      const shares = stock.shares;
+      const price = stock.dividendInfo?.currentPrice !== undefined ? stock.dividendInfo.currentPrice : '';
+      const yieldPct = stock.dividendInfo?.yield !== undefined ? (stock.dividendInfo.yield * 100).toFixed(2) + '%' : '';
+      
+      let dps = stock.dividendInfo?.amount !== undefined ? stock.dividendInfo.amount : 0;
+      let received = 0;
+      let pending = 0;
+      let total = 0;
+      let manualMark = '';
+
+      if (stock.manualDividendAdjustment !== undefined && stock.manualDividendAdjustment !== null) {
+        received = stock.manualDividendAdjustment;
+        pending = 0;
+        total = stock.manualDividendAdjustment;
+        dps = shares > 0 ? Number((stock.manualDividendAdjustment / shares).toFixed(4)) : (stock.dividendInfo?.amount || 0);
+        manualMark = String(stock.manualDividendAdjustment);
+      } else if (stock.dividendInfo) {
+        const info = stock.dividendInfo;
+        const rAmount = (info.receivedAmountCurrentYear || (info as any).receivedAmount2026 || 0) * shares;
+        const pAmount = (info.pendingAmountCurrentYear || (info as any).pendingAmount2026 || 0) * shares;
+        received = rAmount;
+        pending = pAmount;
+        total = rAmount + pAmount;
+      }
+
+      return [
+        symbol,
+        name,
+        shares,
+        price,
+        dps,
+        Math.round(received),
+        Math.round(pending),
+        Math.round(total),
+        yieldPct,
+        manualMark
+      ];
+    });
+
+    // Generate CSV string with UTF-8 BOM
+    const csvContent = "\uFEFF" + [headers.join(','), ...rows.map(e => e.map(val => {
+      const strVal = String(val);
+      if (strVal.includes(',') || strVal.includes('"') || strVal.includes('\n')) {
+        return `"${strVal.replace(/"/g, '""')}"`;
+      }
+      return strVal;
+    }).join(','))].join('\n');
+
+    // Create Download Link
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", `息引力_持股與領息預估_${new Date().getFullYear()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleRefreshAll = async () => {
@@ -667,7 +887,7 @@ function MainApp() {
 
   // Schedule Today's Notifications
   useEffect(() => {
-    if (notificationPermission !== 'granted' || stocks.length === 0) return;
+    if (!notificationsEnabled || notificationPermission !== 'granted' || stocks.length === 0) return;
 
     const today = startOfToday();
     const now = new Date();
@@ -697,7 +917,7 @@ function MainApp() {
     }, timeUntilTarget);
 
     return () => clearTimeout(timer);
-  }, [notificationPermission, stocks, calendarEvents]);
+  }, [notificationPermission, notificationsEnabled, stocks, calendarEvents]);
 
   const dividendStats = useMemo(() => {
     const today = startOfToday();
@@ -850,6 +1070,127 @@ function MainApp() {
     return { totalValue, allocationData, totalWeightedYield };
   }, [stocks, componentLimit]);
 
+  const handleUpdateTelegramSettings = async (token: string, chatId: string) => {
+    setTelegramBotToken(token);
+    setTelegramChatId(chatId);
+    if (user) {
+      const userRef = doc(db, 'users', user.uid);
+      try {
+        await setDoc(userRef, { 
+          telegramBotToken: token,
+          telegramChatId: chatId
+        }, { merge: true });
+      } catch (err) {
+        handleFirestoreError(err as any, OperationType.WRITE, `users/${user.uid}/telegram`);
+      }
+    } else {
+      localStorage.setItem('telegram_bot_token', token);
+      localStorage.setItem('telegram_chat_id', chatId);
+    }
+
+    // 動態向 Telegram 註冊此 Webhook，實現雙向即時對話
+    if (token) {
+      try {
+        const response = await fetch('/api/telegram/register-webhook', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            botToken: token,
+            baseUrl: window.location.origin
+          })
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+          alert(`🎉 設定儲存成功！\n\n${data.description || '機器人已成功啟用雙向智慧對話服務！現在對您的機器人傳送任意訊息，它將為您展示資產及投資建議囉。'}`);
+        } else {
+          console.warn('Webhook registration failed:', data.error);
+          alert('設定儲存成功！不過機器人 Webhook 連線通訊發生些許異常，請檢查 Token 是否填寫無誤。');
+        }
+      } catch (e) {
+        console.error('Failed to register telegram webhook:', e);
+        alert('設定已成功儲存！');
+      }
+    } else {
+      alert('🔒 設定已成功儲存！');
+    }
+  };
+
+  const handleSendTelegramAlert = async () => {
+    if (!telegramBotToken || !telegramChatId) {
+      alert('請先在設定面板填寫正確的 Bot Token 與 Chat ID！');
+      return;
+    }
+
+    setIsSendingTelegram(true);
+    const totalAssets = portfolioData.totalValue + cash;
+    const stockPct = totalAssets > 0 ? ((portfolioData.totalValue / totalAssets) * 100).toFixed(1) : '0';
+    const cashPct = totalAssets > 0 ? ((cash / totalAssets) * 100).toFixed(1) : '0';
+
+    // Top Stocks
+    const topStocks = [...stocks]
+      .filter(s => s.shares > 0)
+      .sort((a, b) => {
+        const valA = (a.dividendInfo?.currentPrice || 0) * a.shares;
+        const valB = (b.dividendInfo?.currentPrice || 0) * b.shares;
+        return valB - valA;
+      })
+      .slice(0, 3);
+
+    const stocksText = topStocks.length > 0 
+      ? topStocks.map((s, idx) => {
+          const val = (s.dividendInfo?.currentPrice || 0) * s.shares;
+          return `${idx + 1}. *${s.name} (${s.symbol})*: $${val.toLocaleString()} 元 (佔證券 ${(val / (portfolioData.totalValue || 1) * 100).toFixed(1)}%)`;
+        }).join('\n')
+      : '目前無持股部位';
+
+    // Auto balance recommendations
+    let recommendation = '';
+    if (cash > 1200000) {
+      recommendation = `目前您的現金餘額為 $${cash.toLocaleString()} 元，已高於 120 萬防禦性防線（安全水準！）。\n多出的 $${(cash - 1200000).toLocaleString()} 元子彈已整裝待發，可留意季線 MA60 回檔支撐分批加碼，以發揮滾存最高綜效。`;
+    } else {
+      recommendation = `目前您的現金餘額為 $${cash.toLocaleString()} 元，低於 120 萬防禦性標準配額。\n建議暫緩大筆資金高風險衝刺，優先以「定時定額」或維持防守型存股，等待閒置現金水位回歸安全防禦底線。`;
+    }
+
+    const message = `🤖 *【息引力資產動態平衡報告】*\n` +
+      `------------------------------------------\n` +
+      `📊 *目前總資產水準檢視*\n` +
+      `• *總資產價值*：$${totalAssets.toLocaleString()} 元\n` +
+      `• *證券總市值*：$${portfolioData.totalValue.toLocaleString()} 元 (${stockPct}%)\n` +
+      `• *帳戶閒置現金*：$${cash.toLocaleString()} 元 (${cashPct}%)\n` +
+      `• *投資組合加權平均殖利率*：${portfolioData.totalWeightedYield.toFixed(2)}%\n\n` +
+      `🏆 *三大核心市值持股部位*\n` +
+      `${stocksText}\n\n` +
+      `🎯 *下週資產操作配置建議*\n` +
+      `${recommendation}\n\n` +
+      `👉 _此推播報告由「息引力」資產守護助理動態生成發送。_`;
+
+    try {
+      const response = await fetch('/api/telegram/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          botToken: telegramBotToken,
+          chatId: telegramChatId,
+          message: message
+        }),
+      });
+
+      const data = await response.json();
+      if (response.ok && data.success) {
+        alert('🎉 Telegram 策略平衡報告發送成功！請查看您的 Telegram。');
+      } else {
+        alert(`❌ 發送失敗，錯誤說明: ${data.error || '可能是 Bot Token 或 Chat ID 輸入有誤'}`);
+      }
+    } catch (error: any) {
+      console.error(error);
+      alert(`❌ 發送失敗: ${error?.message || '請確認與伺服器之網路連線'}`);
+    } finally {
+      setIsSendingTelegram(false);
+    }
+  };
+
   const COLORS = ['#6366f1', '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#f43f5e', '#fb7185', '#fda4af', '#fecdd3', '#ffe4e6'];
 
   const [activeTab, setActiveTab] = useState<'calendar' | 'list'>('calendar');
@@ -959,7 +1300,7 @@ function MainApp() {
                           animate={{ opacity: 1, y: 0, scale: 1 }}
                           exit={{ opacity: 0, y: 10, scale: 0.95 }}
                           className={cn(
-                            "absolute right-0 mt-2 w-56 rounded-2xl shadow-xl border z-50 overflow-hidden",
+                            "absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl shadow-xl border z-50 overflow-y-auto max-h-[85vh] scrollbar-thin",
                             darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
                           )}
                         >
@@ -987,7 +1328,7 @@ function MainApp() {
                             <button
                               onClick={() => setDarkMode(!darkMode)}
                               className={cn(
-                                "w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-colors",
+                                "w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-colors select-none cursor-pointer",
                                 darkMode ? "hover:bg-slate-800 text-slate-300" : "hover:bg-slate-50 text-slate-600"
                               )}
                             >
@@ -1006,78 +1347,127 @@ function MainApp() {
                               </div>
                             </button>
 
-                            {/* API Usage Info */}
-                            <div className={cn(
-                              "px-3 py-2 border-t border-slate-100 dark:border-slate-800 mt-1",
-                              darkMode ? "text-slate-300" : "text-slate-600"
-                            )}>
-                              <div className="flex justify-between items-center mb-1">
-                                <p className="text-[10px] font-black uppercase tracking-wider opacity-50">今日 API 額度</p>
-                                <span className={cn(
-                                  "text-[10px] font-black",
-                                  apiUsage.count > 80 ? "text-red-500" : apiUsage.count > 50 ? "text-amber-500" : "text-emerald-500"
-                                )}>
-                                  {apiUsage.count} / 100
-                                </span>
+                            {/* Notification Toggle */}
+                            <button
+                              onClick={async () => {
+                                if (!notificationsEnabled) {
+                                  await requestNotificationPermission();
+                                  setNotificationsEnabled(true);
+                                } else {
+                                  setNotificationsEnabled(false);
+                                }
+                              }}
+                              className={cn(
+                                "w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer select-none",
+                                darkMode ? "hover:bg-slate-800 text-slate-300" : "hover:bg-slate-50 text-slate-600"
+                              )}
+                            >
+                              <div className="flex items-center gap-2">
+                                <BellRing className={cn("w-4 h-4", notificationsEnabled ? "text-emerald-500 animate-pulse" : "text-slate-400")} />
+                                <span>除息領息通知</span>
                               </div>
-                              <div className={cn(
-                                "w-full h-1 rounded-full overflow-hidden",
-                                darkMode ? "bg-slate-800" : "bg-slate-100"
-                              )}>
-                                <div 
-                                  className={cn(
-                                    "h-full transition-all duration-500",
-                                    apiUsage.count > 80 ? "bg-red-500" : apiUsage.count > 50 ? "bg-amber-500" : "bg-emerald-500"
-                                  )}
-                                  style={{ width: `${Math.min(apiUsage.count, 100)}%` }}
-                                />
-                              </div>
-                              <p className="text-[8px] opacity-40 mt-1 leading-tight">
-                                註：此額度為 Google Search 每日搜尋限制。若額度用完，系統將自動切換至全域快取模式。
-                              </p>
-                            </div>
-
-                            {/* Notification Settings */}
-                            <div className={cn(
-                              "px-3 py-2 border-t border-slate-100 dark:border-slate-800 mt-1",
-                              darkMode ? "text-slate-300" : "text-slate-600"
-                            )}>
-                              <p className="text-[10px] font-black uppercase tracking-wider mb-2 opacity-50">通知設定</p>
-                              <div className="flex flex-col gap-2">
-                                {notificationPermission !== 'granted' ? (
-                                  <button
-                                    onClick={requestNotificationPermission}
-                                    className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-[11px] font-bold bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shadow-sm active:scale-95"
+                              <div className="flex items-center gap-1.5">
+                                {notificationsEnabled && (
+                                  <span 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      testNotification();
+                                    }}
+                                    className="text-[10px] text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 font-bold underline px-1.5 cursor-pointer hover:opacity-80"
                                   >
-                                    <AlertCircle className="w-4 h-4" />
-                                    <span>開啟系統通知</span>
-                                  </button>
-                                ) : (
-                                  <div className={cn(
-                                    "flex items-center justify-between px-3 py-2 rounded-xl border transition-colors",
-                                    darkMode ? "bg-slate-800/50 border-slate-700" : "bg-slate-50 border-slate-100"
-                                  )}>
-                                    <div className="flex items-center gap-2">
-                                      <BellRing className="w-3.5 h-3.5 text-emerald-500" />
-                                      <span className="text-[11px] font-bold text-emerald-500">股息通知已就緒</span>
-                                    </div>
-                                    <button
-                                      onClick={testNotification}
-                                      className={cn(
-                                        "flex items-center gap-1.5 px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition-all active:scale-95",
-                                        darkMode ? "bg-slate-700 text-slate-300 hover:bg-slate-600" : "bg-white text-slate-500 hover:bg-slate-100 border border-slate-200"
-                                      )}
-                                    >
-                                      <Send className="w-3 h-3" />
-                                      <span>發送測試</span>
-                                    </button>
-                                  </div>
+                                    測試
+                                  </span>
                                 )}
-                                <p className="text-[10px] opacity-70 leading-relaxed px-1 mt-1">
-                                  開啟後，當天 8:00 若有除息或領息事件會自動彈出提醒。
-                                  <br />
-                                  <span className="text-indigo-400 font-bold">💡 手機小撇步：</span> 將此網頁「加入主畫面」(PWA)，通知功能會更準確且支援背景推播。
-                                </p>
+                                <div className={cn(
+                                  "w-8 h-4 rounded-full relative transition-colors",
+                                  notificationsEnabled ? "bg-indigo-600" : "bg-slate-300"
+                                )}>
+                                  <div className={cn(
+                                    "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                                    notificationsEnabled ? "right-0.5" : "left-0.5"
+                                  )} />
+                                </div>
+                              </div>
+                            </button>
+
+                            {/* Telegram Integration Settings */}
+                            <div className={cn(
+                              "px-3 py-2.5 border-t border-slate-100 dark:border-slate-800 mt-1",
+                              darkMode ? "text-slate-300" : "text-slate-600"
+                            )}>
+                              <div className="flex items-center justify-between mb-1.5">
+                                <div className="flex items-center gap-1.5">
+                                  <MessageSquare className="w-4 h-4 text-sky-500" />
+                                  <p className="text-[10px] font-black uppercase tracking-wider opacity-60">Telegram 推播設定</p>
+                                </div>
+                                <a 
+                                  href="https://t.me/BotFather" 
+                                  target="_blank" 
+                                  rel="noreferrer" 
+                                  className="text-[9px] text-sky-500 hover:underline font-bold"
+                                >
+                                  申請機器人 ↗
+                                </a>
+                              </div>
+                              <div className="flex flex-col gap-2">
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="text-[9px] font-bold opacity-60">Bot Token</span>
+                                    <input
+                                      type="password"
+                                      value={telegramBotToken}
+                                      onChange={(e) => setTelegramBotToken(e.target.value)}
+                                      placeholder="Bot Token"
+                                      className={cn(
+                                        "w-full text-[10px] font-medium rounded-lg px-2 py-1 border focus:outline-none focus:ring-1 focus:ring-sky-500",
+                                        darkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-800"
+                                      )}
+                                    />
+                                  </div>
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="text-[9px] font-bold opacity-60">Chat ID</span>
+                                    <input
+                                      type="text"
+                                      value={telegramChatId}
+                                      onChange={(e) => setTelegramChatId(e.target.value)}
+                                      placeholder="Chat ID"
+                                      className={cn(
+                                        "w-full text-[10px] font-medium rounded-lg px-2 py-1 border focus:outline-none focus:ring-1 focus:ring-sky-500",
+                                        darkMode ? "bg-slate-800 border-slate-700 text-slate-100" : "bg-white border-slate-200 text-slate-800"
+                                      )}
+                                    />
+                                  </div>
+                                </div>
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => handleUpdateTelegramSettings(telegramBotToken, telegramChatId)}
+                                    className={cn(
+                                      "flex-1 text-[10px] font-black uppercase tracking-wider py-1 rounded-lg border shadow-sm transition-all active:scale-95 text-center cursor-pointer",
+                                      darkMode 
+                                        ? "bg-slate-700 hover:bg-slate-600 text-slate-200 border-slate-600" 
+                                        : "bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200"
+                                    )}
+                                  >
+                                    儲存設定
+                                  </button>
+                                  <button
+                                    onClick={handleSendTelegramAlert}
+                                    disabled={isSendingTelegram}
+                                    className="flex-1 flex items-center justify-center gap-1 text-[10px] font-black uppercase tracking-wider py-1 rounded-lg bg-sky-500 text-white hover:bg-sky-600 transition-colors shadow-sm active:scale-95 disabled:opacity-50 cursor-pointer"
+                                  >
+                                    {isSendingTelegram ? (
+                                      <>
+                                        <Loader2 className="w-3 animate-spin" />
+                                        <span>發送中...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Send className="w-3 h-3" />
+                                        <span>測試發送</span>
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
                               </div>
                             </div>
 
@@ -1640,23 +2030,24 @@ function MainApp() {
             <motion.div 
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="grid grid-cols-1 gap-3"
+              className="space-y-3"
             >
-              {stocks.length === 0 ? (
-                <div className={cn(
-                  "text-center py-12 rounded-2xl border border-dashed transition-colors",
-                  darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"
-                )}>
+              <div className="grid grid-cols-1 gap-3">
+                {stocks.length === 0 ? (
                   <div className={cn(
-                    "w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-3",
-                    darkMode ? "bg-slate-800" : "bg-slate-50"
+                    "text-center py-12 rounded-2xl border border-dashed transition-colors",
+                    darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-200"
                   )}>
-                    <Search className="w-6 h-6 text-slate-300" />
+                    <div className={cn(
+                      "w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-3",
+                      darkMode ? "bg-slate-800" : "bg-slate-50"
+                    )}>
+                      <Search className="w-6 h-6 text-slate-300" />
+                    </div>
+                    <p className="text-sm text-slate-400 font-medium">尚未加入任何股票</p>
                   </div>
-                  <p className="text-sm text-slate-400 font-medium">尚未加入任何股票</p>
-                </div>
-              ) : (
-                stocks.map((stock) => (
+                ) : (
+                  stocks.map((stock) => (
                   <motion.div 
                     key={stock.symbol}
                     layout
@@ -1986,6 +2377,7 @@ function MainApp() {
                   </motion.div>
                 ))
               )}
+              </div>
             </motion.div>
           )}
         </div>
@@ -1995,27 +2387,150 @@ function MainApp() {
           "p-4 rounded-2xl shadow-sm border transition-colors flex flex-col",
           darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
         )}>
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-4 shrink-0 gap-2">
-            <div className="flex items-center gap-2">
-              <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>庫存分佈</h2>
-              <select
-                value={componentLimit}
-                onChange={(e) => setComponentLimit(Number(e.target.value))}
-                className={cn(
-                  "text-[10px] font-bold rounded-lg px-2 py-1 border-none focus:ring-0",
-                  darkMode ? "bg-slate-700 text-slate-200" : "bg-slate-100 text-slate-600"
-                )}
-              >
-                <option value={5}>Top 5</option>
-                <option value={10}>Top 10</option>
-                <option value={20}>Top 20</option>
-              </select>
+          <div className="flex flex-col gap-2 mb-4 shrink-0">
+            {/* Top row: Title/Dropdown on left, Export Button on right */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>庫存分佈</h2>
+                <select
+                  value={componentLimit}
+                  onChange={(e) => setComponentLimit(Number(e.target.value))}
+                  className={cn(
+                    "text-[10px] font-bold rounded-lg px-2 py-1 border-none focus:ring-0",
+                    darkMode ? "bg-slate-700 text-slate-200" : "bg-slate-100 text-slate-600"
+                  )}
+                >
+                  <option value={5}>Top 5</option>
+                  <option value={10}>Top 10</option>
+                  <option value={20}>Top 20</option>
+                </select>
+              </div>
+              
+              {stocks.length > 0 && (
+                <button
+                  onClick={handleExportCSV}
+                  className={cn(
+                    "flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] font-bold transition-all active:scale-95 shadow-sm border cursor-pointer",
+                    darkMode 
+                      ? "bg-slate-700 text-indigo-400 hover:bg-slate-600 border-slate-600/50" 
+                      : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100 border-indigo-100/50"
+                  )}
+                >
+                  <Download className="w-3 h-3" />
+                  <span>匯出 CSV</span>
+                </button>
+              )}
             </div>
-            <p className={cn("text-[10px] sm:text-xs font-bold", darkMode ? "text-slate-400" : "text-slate-500")}>
-              平均殖利率: <span className="text-emerald-500 mr-2">{portfolioData.totalWeightedYield.toFixed(2)}%</span>
-              總現值: <span className="text-indigo-500">${portfolioData.totalValue.toLocaleString()}</span>
-            </p>
+            
+            {/* Stats info row */}
+            <div className="flex flex-wrap items-center gap-3">
+              <p className={cn("text-[10px] sm:text-xs font-bold", darkMode ? "text-slate-400" : "text-slate-500")}>
+                平均殖利率: <span className="text-emerald-500 mr-2">{portfolioData.totalWeightedYield.toFixed(2)}%</span>
+                總現值: <span className="text-indigo-500">${portfolioData.totalValue.toLocaleString()}</span>
+              </p>
+            </div>
           </div>
+
+          {/* Cash & Assets Info Summary */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 p-3.5 rounded-2xl bg-slate-50/70 dark:bg-slate-900/60 border border-slate-200/50 dark:border-slate-800">
+            {/* Stocks Assets */}
+            <div className="flex flex-col">
+              <span className="text-[10px] font-extrabold tracking-wider uppercase text-slate-600 dark:text-slate-300">我的證券 (Stocks)</span>
+              <span className="text-sm font-black text-indigo-600 dark:text-indigo-400 mt-1">${portfolioData.totalValue.toLocaleString()}</span>
+              {/* Progress indicator */}
+              <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800/80 overflow-hidden">
+                <div 
+                  className="h-full bg-indigo-500 dark:bg-indigo-400 rounded-full" 
+                  style={{ width: `${portfolioData.totalValue + cash > 0 ? (portfolioData.totalValue / (portfolioData.totalValue + cash)) * 100 : 0}%` }}
+                />
+              </div>
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mt-1">
+                佔總資產: {portfolioData.totalValue + cash > 0 ? ((portfolioData.totalValue / (portfolioData.totalValue + cash)) * 100).toFixed(1) : 0}%
+              </span>
+            </div>
+
+            {/* Cash Assets */}
+            <div className="flex flex-col relative group">
+              <span className="text-[10px] font-extrabold tracking-wider uppercase text-slate-600 dark:text-slate-300">我的現金 (Cash)</span>
+              {isEditingCash ? (
+                <div className="flex items-center gap-1.5 mt-1">
+                  <span className="text-xs font-black text-emerald-600 dark:text-emerald-400">$</span>
+                  <input
+                    type="number"
+                    value={cashInput}
+                    onChange={(e) => setCashInput(e.target.value)}
+                    onBlur={() => {
+                      const value = cashInput === '' ? 0 : Number(cashInput);
+                      handleUpdateCash(value);
+                      setIsEditingCash(false);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const value = cashInput === '' ? 0 : Number(cashInput);
+                        handleUpdateCash(value);
+                        setIsEditingCash(false);
+                      }
+                    }}
+                    autoFocus
+                    placeholder="輸入現金金額"
+                    onFocus={(e) => e.target.select()}
+                    className={cn(
+                      "w-28 text-xs font-bold rounded-lg px-2 py-0.5 border border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500",
+                      darkMode ? "bg-slate-800 text-slate-200" : "bg-white text-slate-700"
+                    )}
+                  />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 mt-1">
+                  <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">${cash.toLocaleString()}</span>
+                  <button 
+                    onClick={() => {
+                      setCashInput(cash.toString());
+                      setIsEditingCash(true);
+                    }}
+                    className={cn(
+                      "text-[9px] font-black tracking-wider uppercase px-2 py-0.5 rounded-lg border shadow-sm transition-all active:scale-95",
+                      darkMode 
+                        ? "bg-slate-700 hover:bg-slate-600 text-slate-200 border-slate-600" 
+                        : "bg-white hover:bg-slate-100 text-slate-700 border-slate-200"
+                    )}
+                  >
+                    設定金額
+                  </button>
+                </div>
+              )}
+              {/* Progress indicator */}
+              <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800/80 overflow-hidden">
+                <div 
+                  className="h-full bg-emerald-500 dark:bg-emerald-400 rounded-full" 
+                  style={{ width: `${portfolioData.totalValue + cash > 0 ? (cash / (portfolioData.totalValue + cash)) * 100 : 0}%` }}
+                />
+              </div>
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mt-1">
+                佔總資產: {portfolioData.totalValue + cash > 0 ? ((cash / (portfolioData.totalValue + cash)) * 100).toFixed(1) : 0}%
+              </span>
+            </div>
+
+            {/* Total Assets */}
+            <div className="flex flex-col">
+              <span className="text-[10px] font-extrabold tracking-wider uppercase text-slate-600 dark:text-slate-300">總資產價值 (Total Net Worth)</span>
+              <span className={cn("text-sm font-black mt-1", darkMode ? "text-slate-100" : "text-slate-800")}>
+                ${(portfolioData.totalValue + cash).toLocaleString()}
+              </span>
+              <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800/80 overflow-hidden flex">
+                <div 
+                  className="h-full bg-indigo-500 dark:bg-indigo-400" 
+                  style={{ width: `${portfolioData.totalValue + cash > 0 ? (portfolioData.totalValue / (portfolioData.totalValue + cash)) * 100 : 100}%` }}
+                />
+                <div 
+                  className="h-full bg-emerald-500 dark:bg-emerald-400" 
+                  style={{ width: `${portfolioData.totalValue + cash > 0 ? (cash / (portfolioData.totalValue + cash)) * 100 : 0}%` }}
+                />
+              </div>
+              <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mt-1">證券 + 現金</span>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-1">
             {portfolioData.allocationData.map((item, index) => (
               <div key={index} className="flex justify-between items-center text-[10px] sm:text-[11px] py-1 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
