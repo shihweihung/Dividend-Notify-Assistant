@@ -124,6 +124,8 @@ function MainApp() {
     return saved === 'true';
   });
   const [isOverviewExpanded, setIsOverviewExpanded] = useState(true);
+  const [selectedYear, setSelectedYear] = useState<number>(() => new Date().getFullYear());
+  const [hasAutoRefreshed, setHasAutoRefreshed] = useState(false);
   const [cash, setCash] = useState<number>(0);
   const [isEditingCash, setIsEditingCash] = useState(false);
   const [cashInput, setCashInput] = useState('');
@@ -357,6 +359,25 @@ function MainApp() {
     }
   }, [stocks, user, isAuthReady]);
 
+  // Auto-heal stale dividend data due to earlier Minguo year bug or older caches
+  useEffect(() => {
+    if (isAuthReady && stocks.length > 0 && !hasAutoRefreshed && !isLoading) {
+      const fixTime = new Date("2026-06-30T07:10:00Z").getTime();
+      const needsRefresh = stocks.some(stock => {
+        if (!stock.dividendInfo) return true;
+        if (stock.dividendInfo.source === '手動輸入') return false;
+        if (!stock.dividendInfo.updatedAt) return true;
+        return new Date(stock.dividendInfo.updatedAt).getTime() < fixTime;
+      });
+
+      if (needsRefresh) {
+        setHasAutoRefreshed(true);
+        console.log("Stale or buggy dividend format detected. Triggering silent background auto-refresh to heal database...");
+        handleRefreshAll();
+      }
+    }
+  }, [stocks, isAuthReady, hasAutoRefreshed, isLoading]);
+
   const toggleEtfExpansion = (symbol: string) => {
     setExpandedEtf(prev => {
       const next = new Set(prev);
@@ -427,6 +448,7 @@ function MainApp() {
       setManualPayDate('');
       setManualPrice('');
       setError(null);
+      setShowAddForm(false);
     } catch (err) {
       console.error("Manual add error:", err);
       setError("手動新增失敗，請檢查輸入格式。");
@@ -513,6 +535,7 @@ function MainApp() {
         }
         setNewSymbol('');
         setNewShares(0);
+        setShowAddForm(false);
       } else {
         setError('找不到該股票的股息資訊，請確認代號是否正確。');
       }
@@ -670,6 +693,7 @@ function MainApp() {
       '股票名稱',
       '持有股數',
       '目前現價',
+      '目前現值',
       '每股股利',
       '已領股息',
       '未領股息',
@@ -680,10 +704,12 @@ function MainApp() {
 
     const rows = stocks.map(stock => {
       const symbol = stock.symbol;
+      const displaySymbol = /^\d+$/.test(symbol) ? `\t${symbol}` : symbol;
       const name = stock.name;
       const shares = stock.shares;
       const price = stock.dividendInfo?.currentPrice !== undefined ? stock.dividendInfo.currentPrice : '';
-      const yieldPct = stock.dividendInfo?.yield !== undefined ? (stock.dividendInfo.yield * 100).toFixed(2) + '%' : '';
+      const currentValue = price !== '' ? Math.round(Number(price) * Number(shares)) : 0;
+      const yieldPct = stock.dividendInfo?.yield !== undefined ? stock.dividendInfo.yield.toFixed(2) + '%' : '';
       
       let dps = stock.dividendInfo?.amount !== undefined ? stock.dividendInfo.amount : 0;
       let received = 0;
@@ -701,16 +727,19 @@ function MainApp() {
         const info = stock.dividendInfo;
         const rAmount = (info.receivedAmountCurrentYear || (info as any).receivedAmount2026 || 0) * shares;
         const pAmount = (info.pendingAmountCurrentYear || (info as any).pendingAmount2026 || 0) * shares;
+        const rAmount_fallback = (info as any).receivedAmount2026 || 0;
+        const pAmount_fallback = (info as any).pendingAmount2026 || 0;
         received = rAmount;
         pending = pAmount;
         total = rAmount + pAmount;
       }
 
       return [
-        symbol,
+        displaySymbol,
         name,
         shares,
         price,
+        currentValue,
         dps,
         Math.round(received),
         Math.round(pending),
@@ -752,8 +781,8 @@ function MainApp() {
           let info: DividendInfo | null = null;
           
           // Refresh All should bypass cache to get the most up-to-date data
-          // Add a delay between requests to avoid rate limits (RPM)
-          if (i > 0) await new Promise(resolve => setTimeout(resolve, 8000));
+          // Add a short delay between requests to avoid hitting rate limits too fast
+          if (i > 0) await new Promise(resolve => setTimeout(resolve, 500));
           
           incrementApiUsage();
           const response = await fetch(`/api/dividend/${stock.symbol}`);
@@ -922,7 +951,7 @@ function MainApp() {
   const dividendStats = useMemo(() => {
     const today = startOfToday();
     const currentYear = today.getFullYear();
-    const startDate = new Date(currentYear, 0, 1); // e.g., 2026/01/01
+    const todayStr = format(today, 'yyyy-MM-dd');
     
     let received = 0;
     let pending = 0;
@@ -938,8 +967,8 @@ function MainApp() {
         const info = stock.dividendInfo;
         const symbol = stock.symbol;
         
-        // Use manual adjustment if available
-        if (stock.manualDividendAdjustment !== undefined && stock.manualDividendAdjustment !== null) {
+        // If there's manual adjustment AND it's the current year, override
+        if (selectedYear === currentYear && stock.manualDividendAdjustment !== undefined && stock.manualDividendAdjustment !== null) {
           const amount = stock.manualDividendAdjustment;
           total += amount;
           received += amount; 
@@ -949,50 +978,109 @@ function MainApp() {
           monthlyReceivedTotals[currentMonthIdx] += amount;
           monthlyBreakdown[currentMonthIdx].push({ symbol, amount, isPending: false });
         } else {
-          const rAmount = ((info as any).receivedAmountCurrentYear || (info as any).receivedAmount2026 || 0) * stock.shares;
-          const pAmount = ((info as any).pendingAmountCurrentYear || (info as any).pendingAmount2026 || 0) * stock.shares;
-          
-          received += rAmount;
-          pending += pAmount;
-          total += (rAmount + pAmount);
-          stockTotal = rAmount + pAmount;
+          // Check if we have monthly arrays for current year. 
+          // If so, ALWAYS use them for currentYear to remain 100% accurate and backward-compatible with saved user portfolios.
+          const hasMonthlyDistribution = selectedYear === currentYear && 
+            ((info.monthlyDistribution && info.monthlyDistribution.some(v => v > 0)) || 
+             (info.pendingMonthlyDistribution && info.pendingMonthlyDistribution.some(v => v > 0)));
 
-          if (info.monthlyDistribution && Array.isArray(info.monthlyDistribution)) {
-            info.monthlyDistribution.forEach((monthlyAmount, monthIdx) => {
-              if (monthIdx < 12 && monthlyAmount > 0) {
-                const val = monthlyAmount * stock.shares;
-                monthlyReceivedTotals[monthIdx] += val;
-                monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: false });
-              }
-            });
-          }
+          if (hasMonthlyDistribution) {
+            let rAmount = 0;
+            let pAmount = 0;
 
-          if (info.pendingMonthlyDistribution && Array.isArray(info.pendingMonthlyDistribution)) {
-            info.pendingMonthlyDistribution.forEach((monthlyAmount, monthIdx) => {
-              if (monthIdx < 12 && monthlyAmount > 0) {
-                const val = monthlyAmount * stock.shares;
-                monthlyPendingTotals[monthIdx] += val;
-                monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: true });
-              }
-            });
-          }
-
-          if ((!info.monthlyDistribution || !info.monthlyDistribution.some(v => v > 0)) && 
-              (!info.pendingMonthlyDistribution || !info.pendingMonthlyDistribution.some(v => v > 0)) && 
-              (info.paymentDate || info.exDividendDate)) {
-            const dateStr = info.paymentDate || info.exDividendDate;
-            const pDate = parseISO(dateStr);
-            if (!isNaN(pDate.getTime()) && pDate.getFullYear() === currentYear) {
-              const month = pDate.getMonth();
-              const val = info.amount * stock.shares;
-              if (dateStr <= format(today, 'yyyy-MM-dd')) {
-                monthlyReceivedTotals[month] += val;
-                monthlyBreakdown[month].push({ symbol, amount: val, isPending: false });
-              } else {
-                monthlyPendingTotals[month] += val;
-                monthlyBreakdown[month].push({ symbol, amount: val, isPending: true });
-              }
+            if (info.monthlyDistribution && Array.isArray(info.monthlyDistribution)) {
+              info.monthlyDistribution.forEach((monthlyAmount, monthIdx) => {
+                if (monthIdx < 12 && monthlyAmount > 0) {
+                  const val = monthlyAmount * stock.shares;
+                  rAmount += val;
+                  monthlyReceivedTotals[monthIdx] += val;
+                  monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: false });
+                }
+              });
             }
+
+            if (info.pendingMonthlyDistribution && Array.isArray(info.pendingMonthlyDistribution)) {
+              info.pendingMonthlyDistribution.forEach((monthlyAmount, monthIdx) => {
+                if (monthIdx < 12 && monthlyAmount > 0) {
+                  const val = monthlyAmount * stock.shares;
+                  pAmount += val;
+                  monthlyPendingTotals[monthIdx] += val;
+                  monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: true });
+                }
+              });
+            }
+
+            received += rAmount;
+            pending += pAmount;
+            total += (rAmount + pAmount);
+            stockTotal = rAmount + pAmount;
+          } else {
+            // Use history (or fallback to latest single payment if history is totally empty)
+            const hasHistory = info.history && Array.isArray(info.history) && info.history.length > 0;
+            const historyItems = hasHistory
+              ? info.history!
+              : [{
+                  date: info.exDividendDate || '',
+                  amount: info.amount || 0,
+                  paymentDate: info.paymentDate || ''
+                }];
+
+            historyItems.forEach(div => {
+              if (!div.date) return;
+              
+              let payDateStr = div.paymentDate || "";
+              let pYear = 0;
+              let pMonth = 0;
+              let formattedPayDateStr = "";
+              
+              const parts = payDateStr.split('-');
+              if (parts.length === 3) {
+                pYear = parseInt(parts[0]);
+                pMonth = parseInt(parts[1]) - 1;
+                formattedPayDateStr = payDateStr;
+              } else {
+                // Estimate pay date from ex-dividend date (date + 1 month)
+                const exParts = div.date.split('-');
+                if (exParts.length === 3) {
+                  let yearVal = parseInt(exParts[0]);
+                  let monthVal = parseInt(exParts[1]); // 1-12
+                  monthVal += 1;
+                  if (monthVal > 12) {
+                    monthVal = 1;
+                    yearVal += 1;
+                  }
+                  pYear = yearVal;
+                  pMonth = monthVal - 1;
+                  formattedPayDateStr = `${yearVal}-${String(monthVal).padStart(2, '0')}-${exParts[2]}`;
+                }
+              }
+              
+              if (pYear === selectedYear && pMonth >= 0 && pMonth < 12) {
+                const val = div.amount * stock.shares;
+                if (val > 0) {
+                  let isPending = false;
+                  if (selectedYear < currentYear) {
+                    isPending = false;
+                  } else if (selectedYear > currentYear) {
+                    isPending = true;
+                  } else {
+                    isPending = formattedPayDateStr > todayStr;
+                  }
+                  
+                  if (isPending) {
+                    pending += val;
+                    monthlyPendingTotals[pMonth] += val;
+                    monthlyBreakdown[pMonth].push({ symbol, amount: val, isPending: true });
+                  } else {
+                    received += val;
+                    monthlyReceivedTotals[pMonth] += val;
+                    monthlyBreakdown[pMonth].push({ symbol, amount: val, isPending: false });
+                  }
+                  total += val;
+                  stockTotal += val;
+                }
+              }
+            });
           }
         }
 
@@ -1020,7 +1108,7 @@ function MainApp() {
     }));
 
     return { received, pending, total, distributionData, monthlyData };
-  }, [stocks]);
+  }, [stocks, selectedYear]);
 
   const [componentLimit, setComponentLimit] = useState<number>(10);
   const portfolioData = useMemo(() => {
@@ -1251,11 +1339,23 @@ function MainApp() {
         )}>
           <div className="max-w-4xl mx-auto px-4 py-3">
             <div className="flex justify-between items-center mb-3">
-              <div>
+              <div className="flex items-center gap-2">
                 <h1 className="text-lg font-black tracking-tight text-indigo-500 flex items-center gap-2">
                   <TrendingUp className="w-5 h-5" />
                   息引力
                 </h1>
+                <select
+                  value={selectedYear}
+                  onChange={(e) => setSelectedYear(Number(e.target.value))}
+                  className={cn(
+                    "text-[10px] font-black px-2 py-0.5 rounded-lg border focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-sm select-none",
+                    darkMode ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700"
+                  )}
+                >
+                  {[2026, 2027, 2028, 2029, 2030].map(yr => (
+                    <option key={yr} value={yr}>{yr} 年度</option>
+                  ))}
+                </select>
               </div>
               <div className="flex gap-2 items-center relative">
                 <button 
@@ -1269,16 +1369,190 @@ function MainApp() {
                 >
                   <RefreshCw className={cn("w-5 h-5", isLoading && "animate-spin")} />
                 </button>
-                <button 
-                  onClick={() => setShowAddForm(!showAddForm)}
-                  className="p-2 bg-indigo-600 text-white rounded-full shadow-md active:scale-95 transition-transform"
-                >
-                  <Plus className="w-5 h-5" />
-                </button>
                 
                 <div className="relative">
                   <button 
-                    onClick={() => setShowSettings(!showSettings)}
+                    onClick={() => {
+                      setShowAddForm(!showAddForm);
+                      if (showSettings) setShowSettings(false);
+                    }}
+                    className={cn(
+                      "p-2 rounded-full shadow-md active:scale-95 transition-all cursor-pointer",
+                      showAddForm 
+                        ? "bg-indigo-700 text-white ring-2 ring-indigo-500/50" 
+                        : "bg-indigo-600 text-white hover:bg-indigo-700"
+                    )}
+                    title="新增股票"
+                  >
+                    <Plus className="w-5 h-5" />
+                  </button>
+
+                  <AnimatePresence>
+                    {showAddForm && (
+                      <>
+                        <div 
+                          className="fixed inset-0 z-40" 
+                          onClick={() => setShowAddForm(false)} 
+                        />
+                        <motion.div
+                          initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                          className={cn(
+                            "absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl shadow-xl border z-50 p-4",
+                            darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+                          )}
+                        >
+                          <div className="flex justify-between items-center mb-3 pb-2 border-b border-slate-100 dark:border-slate-800">
+                            <h3 className={cn("text-xs font-black", darkMode ? "text-slate-200" : "text-slate-800")}>
+                              新增股票持股
+                            </h3>
+                            <button 
+                              onClick={() => setShowAddForm(false)}
+                              className="text-[10px] font-bold text-slate-400 hover:text-slate-600 cursor-pointer"
+                            >
+                              關閉
+                            </button>
+                          </div>
+
+                          <div className="space-y-3">
+                            <div className="relative">
+                              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                              <input
+                                type="text"
+                                placeholder="輸入台股代號 (如: 2330)"
+                                value={newSymbol}
+                                onChange={(e) => setNewSymbol(e.target.value)}
+                                className={cn(
+                                  "w-full pl-9 pr-4 py-2 border rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/50 transition-all outline-none",
+                                  darkMode 
+                                    ? "bg-slate-800 text-slate-100 placeholder:text-slate-500 border-slate-700" 
+                                    : "bg-slate-50 text-slate-905 placeholder:text-slate-400 border-slate-200"
+                                )}
+                              />
+                            </div>
+                            
+                            {showManualInput ? (
+                              <motion.div 
+                                initial={{ opacity: 0, y: -10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                className="space-y-3 p-3 rounded-xl border border-dashed border-indigo-500/30 bg-indigo-500/5"
+                              >
+                                <div className="flex justify-between items-center">
+                                  <span className="text-[10px] font-bold text-indigo-500 uppercase tracking-wider">手動輸入模式</span>
+                                  <button 
+                                    onClick={() => setShowManualInput(false)}
+                                    className="text-[10px] font-bold text-slate-450 hover:text-slate-700 cursor-pointer"
+                                  >
+                                    返回自動查詢
+                                  </button>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <input
+                                    type="text"
+                                    placeholder="股票名稱"
+                                    value={manualName}
+                                    onChange={(e) => setManualName(e.target.value)}
+                                    className={cn(
+                                      "w-full px-3 py-2 border rounded-xl text-xs font-bold outline-none",
+                                      darkMode ? "bg-slate-800 text-slate-100 border-slate-700" : "bg-white text-slate-900 border-slate-200"
+                                    )}
+                                  />
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    placeholder="單次配息金額"
+                                    value={manualAmount}
+                                    onChange={(e) => setManualAmount(e.target.value)}
+                                    className={cn(
+                                      "w-full px-3 py-2 border rounded-xl text-xs font-bold outline-none",
+                                      darkMode ? "bg-slate-800 text-slate-100 border-slate-700" : "bg-white text-slate-900 border-slate-200"
+                                    )}
+                                  />
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    placeholder="目前股價 (選填)"
+                                    value={manualPrice}
+                                    onChange={(e) => setManualPrice(e.target.value)}
+                                    className={cn(
+                                      "w-full px-3 py-2 border rounded-xl text-xs font-bold outline-none",
+                                      darkMode ? "bg-slate-800 text-slate-100 border-slate-700" : "bg-white text-slate-900 border-slate-200"
+                                    )}
+                                  />
+                                  <input
+                                    type="number"
+                                    step="0.001"
+                                    placeholder="持有股數"
+                                    value={newShares || ''}
+                                    onChange={(e) => setNewShares(e.target.value === '' ? 0 : Number(e.target.value))}
+                                    className={cn(
+                                      "w-full px-3 py-2 border rounded-xl text-xs font-bold outline-none",
+                                      darkMode ? "bg-slate-800 text-slate-100 border-slate-700" : "bg-white text-slate-900 border-slate-200"
+                                    )}
+                                  />
+                                </div>
+                                <button
+                                  onClick={handleManualAdd}
+                                  disabled={isLoading || !newSymbol || !manualName || !manualAmount}
+                                  className="w-full py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-sm cursor-pointer hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                  {isLoading ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : '手動新增'}
+                                </button>
+                              </motion.div>
+                            ) : (
+                              <div className="flex gap-2">
+                                <div className="flex-1 relative">
+                                  <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                  <input
+                                    type="number"
+                                    placeholder="持有股數"
+                                    value={newShares || ''}
+                                    onFocus={(e) => e.target.select()}
+                                    onChange={(e) => setNewShares(e.target.value === '' ? 0 : Number(e.target.value))}
+                                    className={cn(
+                                      "w-full pl-9 pr-4 py-2 border rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/50 transition-all outline-none",
+                                      darkMode 
+                                        ? "bg-slate-800 text-slate-100 placeholder:text-slate-500 border-slate-700" 
+                                        : "bg-slate-50 text-slate-900 placeholder:text-slate-400 border-slate-200"
+                                    )}
+                                  />
+                                </div>
+                                <button
+                                  onClick={handleAddStock}
+                                  disabled={isLoading || !newSymbol}
+                                  className="px-6 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-sm disabled:opacity-50 active:scale-95 transition-all flex items-center gap-2 cursor-pointer hover:bg-indigo-700"
+                                >
+                                  {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '新增'}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          {error && (
+                            <div className="mt-2 space-y-2">
+                              <p className="text-[10px] text-red-500 font-bold">{error}</p>
+                              {error.includes('上限') && !showManualInput && (
+                                <button 
+                                  onClick={() => setShowManualInput(true)}
+                                  className="text-[10px] font-bold text-indigo-500 underline cursor-pointer"
+                                >
+                                  點此切換至「手動輸入」模式
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </motion.div>
+                      </>
+                    )}
+                  </AnimatePresence>
+                </div>
+                
+                <div className="relative">
+                  <button 
+                    onClick={() => {
+                      setShowSettings(!showSettings);
+                      if (showAddForm) setShowAddForm(false);
+                    }}
                     className={cn(
                       "p-2 rounded-full shadow-sm active:scale-95 transition-all",
                       darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-600",
@@ -1520,7 +1794,7 @@ function MainApp() {
                 <p className={cn(
                   "text-[9px] font-bold uppercase tracking-wider",
                   darkMode ? "text-slate-500" : "text-slate-400"
-                )}>年度總額</p>
+                )}>{selectedYear} 年度總額</p>
                 <p className={cn(
                   "text-sm font-black",
                   darkMode ? "text-slate-100" : "text-slate-900"
@@ -1531,7 +1805,9 @@ function MainApp() {
                 "p-2 rounded-xl border flex flex-col items-center text-center transition-colors",
                 darkMode ? "bg-emerald-950/30 border-emerald-900/50" : "bg-emerald-50/50 border-emerald-100"
               )}>
-                <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-wider">今年已領</p>
+                <p className="text-[9px] font-bold text-emerald-500 uppercase tracking-wider">
+                  {selectedYear === new Date().getFullYear() ? "今年已領" : `${selectedYear} 已領`}
+                </p>
                 <p className="text-sm font-black text-emerald-500">${dividendStats.received.toLocaleString()}</p>
               </div>
 
@@ -1539,7 +1815,9 @@ function MainApp() {
                 "p-2 rounded-xl border flex flex-col items-center text-center transition-colors",
                 darkMode ? "bg-orange-950/30 border-orange-900/50" : "bg-orange-50/50 border-orange-100"
               )}>
-                <p className="text-[9px] font-bold text-orange-500 uppercase tracking-wider">今年未領</p>
+                <p className="text-[9px] font-bold text-orange-500 uppercase tracking-wider">
+                  {selectedYear === new Date().getFullYear() ? "今年未領" : `${selectedYear} 待領`}
+                </p>
                 <p className="text-sm font-black text-orange-500">${dividendStats.pending.toLocaleString()}</p>
               </div>
             </div>
@@ -1557,7 +1835,7 @@ function MainApp() {
             className="flex justify-between items-center mb-2 shrink-0 group"
           >
             <div className="flex flex-col text-left">
-              <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>{new Date().getFullYear()} 股息概況</h2>
+              <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>{selectedYear} 股息概況</h2>
               <p className="text-[10px] text-slate-500 font-bold">點擊{isOverviewExpanded ? '收合' : '展開'}詳細分析</p>
             </div>
             <div className={cn(
@@ -1734,145 +2012,7 @@ function MainApp() {
       </AnimatePresence>
     </div>
           
-      {/* Add Stock Form - Compact */}
-      <AnimatePresence>
-          {showAddForm && (
-            <motion.div 
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              className="overflow-hidden"
-            >
-              <div className={cn(
-                "p-4 rounded-2xl shadow-sm border mb-4 transition-colors",
-                darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
-              )}>
-                <div className="space-y-3">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                    <input
-                      type="text"
-                      placeholder="輸入台股代號 (如: 2330)"
-                      value={newSymbol}
-                      onChange={(e) => setNewSymbol(e.target.value)}
-                      className={cn(
-                        "w-full pl-9 pr-4 py-2 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 transition-all",
-                        darkMode ? "bg-slate-800 text-slate-100 placeholder:text-slate-500" : "bg-slate-50 text-slate-900"
-                      )}
-                    />
-                  </div>
-                  
-                  {showManualInput ? (
-                    <motion.div 
-                      initial={{ opacity: 0, y: -10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="space-y-3 p-3 rounded-xl border border-dashed border-indigo-500/30 bg-indigo-500/5"
-                    >
-                      <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-bold text-indigo-500 uppercase tracking-wider">手動輸入模式</span>
-                        <button 
-                          onClick={() => setShowManualInput(false)}
-                          className="text-[10px] font-bold text-slate-500 hover:text-slate-700"
-                        >
-                          返回自動查詢
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <input
-                          type="text"
-                          placeholder="股票名稱"
-                          value={manualName}
-                          onChange={(e) => setManualName(e.target.value)}
-                          className={cn(
-                            "w-full px-3 py-2 rounded-xl text-xs font-bold outline-none",
-                            darkMode ? "bg-slate-800 text-slate-100" : "bg-slate-50 text-slate-900"
-                          )}
-                        />
-                        <input
-                          type="number"
-                          step="0.01"
-                          placeholder="單次配息金額"
-                          value={manualAmount}
-                          onChange={(e) => setManualAmount(e.target.value)}
-                          className={cn(
-                            "w-full px-3 py-2 rounded-xl text-xs font-bold outline-none",
-                            darkMode ? "bg-slate-800 text-slate-100" : "bg-slate-50 text-slate-900"
-                          )}
-                        />
-                        <input
-                          type="number"
-                          step="0.1"
-                          placeholder="目前股價 (選填)"
-                          value={manualPrice}
-                          onChange={(e) => setManualPrice(e.target.value)}
-                          className={cn(
-                            "w-full px-3 py-2 rounded-xl text-xs font-bold outline-none",
-                            darkMode ? "bg-slate-800 text-slate-100" : "bg-slate-50 text-slate-900"
-                          )}
-                        />
-                        <input
-                          type="number"
-                          step="0.001"
-                          placeholder="持有股數"
-                          value={newShares || ''}
-                          onChange={(e) => setNewShares(e.target.value === '' ? 0 : Number(e.target.value))}
-                          className={cn(
-                            "w-full px-3 py-2 rounded-xl text-xs font-bold outline-none",
-                            darkMode ? "bg-slate-800 text-slate-100" : "bg-slate-50 text-slate-900"
-                          )}
-                        />
-                      </div>
-                      <button
-                        onClick={handleManualAdd}
-                        disabled={isLoading || !newSymbol || !manualName || !manualAmount}
-                        className="w-full py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-sm"
-                      >
-                        {isLoading ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : '手動新增'}
-                      </button>
-                    </motion.div>
-                  ) : (
-                    <div className="flex gap-2">
-                      <div className="flex-1 relative">
-                        <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                          type="number"
-                          placeholder="持有股數"
-                          value={newShares || ''}
-                          onFocus={(e) => e.target.select()}
-                          onChange={(e) => setNewShares(e.target.value === '' ? 0 : Number(e.target.value))}
-                          className={cn(
-                            "w-full pl-9 pr-4 py-2 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 transition-all",
-                            darkMode ? "bg-slate-800 text-slate-100 placeholder:text-slate-500" : "bg-slate-50 text-slate-900"
-                          )}
-                        />
-                      </div>
-                      <button
-                        onClick={handleAddStock}
-                        disabled={isLoading || !newSymbol}
-                        className="px-6 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-sm disabled:opacity-50 active:scale-95 transition-all flex items-center gap-2"
-                      >
-                        {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '新增'}
-                      </button>
-                    </div>
-                  )}
-                </div>
-                {error && (
-                  <div className="mt-2 space-y-2">
-                    <p className="text-[10px] text-red-500 font-bold">{error}</p>
-                    {error.includes('上限') && !showManualInput && (
-                      <button 
-                        onClick={() => setShowManualInput(true)}
-                        className="text-[10px] font-bold text-indigo-500 underline"
-                      >
-                        點此切換至「手動輸入」模式
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+
 
         {/* Tabs - Compact */}
         <div className={cn(

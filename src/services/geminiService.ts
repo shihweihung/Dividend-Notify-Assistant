@@ -72,6 +72,7 @@ export async function fetchDividendData(symbol: string): Promise<DividendInfo | 
     sourceUrl: "https://histock.tw/",
     updatedAt: new Date().toISOString(),
     isPaymentDateEstimated: twseData.isPaymentDateEstimated,
-    status: twseData.status
+    status: twseData.status,
+    history: twseData.history || []
   };
 }

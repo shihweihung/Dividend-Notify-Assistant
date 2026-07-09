@@ -113,10 +113,35 @@ async function startServer() {
     }
   });
 
+  // Keep track of recently processed message IDs to prune duplicate Telegram retry payloads
+  const processedMessageIds = new Map<string, number>();
+
+  // Prune processed message IDs older than 10 minutes every 5 minutes
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, timestamp] of processedMessageIds.entries()) {
+      if (now - timestamp > 600000) {
+        processedMessageIds.delete(key);
+      }
+    }
+  }, 300000);
+
   // Helper: Process Telegram Message (shared by Webhook and Polling)
   async function processTelegramMessage(botToken: string, msg: any) {
     if (!msg || !msg.chat || !msg.chat.id) return;
     const chatId = msg.chat.id;
+    const msgId = msg.message_id;
+
+    // Discard duplicates immediately to prevent duplicate API costs
+    if (msgId) {
+      const dedupKey = `${chatId}_${msgId}`;
+      if (processedMessageIds.has(dedupKey)) {
+        console.log(`[Telegram Bot Dedup] Already processed message ${msgId} for ChatID ${chatId}. Discarding duplicate.`);
+        return;
+      }
+      processedMessageIds.set(dedupKey, Date.now());
+    }
+
     const text = (msg.text || "").trim();
     const username = msg.from?.first_name || msg.from?.username || msg.from?.last_name || "投資大師";
 
@@ -175,7 +200,7 @@ async function startServer() {
 
     const sendTelegramMsg = async (toChatId: number, textToSend: string) => {
       try {
-        await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -184,6 +209,30 @@ async function startServer() {
             parse_mode: "Markdown",
           }),
         });
+
+        // Telegram might return 400 Bad Request for Markdown parsing issues
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          console.warn(`[Telegram Send Warning] Failed to send message with Markdown parsing for ChatID ${toChatId}. Error:`, errData);
+          
+          // Fallback retry without Markdown format (send as safe plain-text)
+          console.log(`[Telegram Send Retry] Retrying message delivery in plain-text mode...`);
+          const retryResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: toChatId,
+              text: textToSend,
+            }),
+          });
+          
+          if (!retryResponse.ok) {
+            const finalErrDetail = await retryResponse.json().catch(() => ({}));
+            console.error(`[Telegram Send Error] Safe fallback retry also failed for ChatID ${toChatId}:`, finalErrDetail);
+          } else {
+            console.log(`[Telegram Send Success] Safe fallback message delivered successfully in plain-text.`);
+          }
+        }
       } catch (err) {
         console.error("Error sending message back to Telegram:", err);
       }
@@ -252,31 +301,39 @@ async function startServer() {
           }).join("\n")
         : "目前持股列表中尚無持股數據（若您剛加入，可返回網頁重新加載以觸發最新的同步）。";
 
+      const backgroundSection = `## 當前個人資產背景\n` +
+        `📊 帳戶：${finalUsername} | 現金：${cash.toLocaleString()} 元\n` +
+        `持股明細：\n` +
+        `${stocksSummary}\n\n`;
+
       const systemInstruction = 
         `# Role: 專業個人理財與股票分析助理\n\n` +
         `## 核心行為準則\n` +
-        `- **直切核心**：嚴禁任何問候、招呼、客套話、結論性廢話 or 結語，直接輸出分析結果。\n` +
-        `- **極致精簡**：不長篇大論、不說廢話、避免重複。字數控制在最精簡範圍，只提供高密度的硬核資訊。\n` +
-        `- **條列重點**：所有分析一律提煉精華，以粗體與條列式呈現，確保 1 分鐘內能快速讀完。\n\n` +
-        `## 當前個人資產背景\n` +
-        `📊 帳戶：${finalUsername} | 現金：${cash.toLocaleString()} 元\n` +
-        `持股明細：\n` +
-        `${stocksSummary}\n\n` +
-        `## 分析框架\n` +
-        `當我提供特定股票、ETF 或市場新聞時，請結合上述「個人資產背景」，快速評估：\n` +
+        `- **直切核心**：嚴禁任何問候、招呼、客套話、結論性廢話或結尾，直接輸出分析結果。\n` +
+        `- **極致精簡**：不長篇大論、不說廢話、避免重複。字數必須控制在最少、最精簡範圍，只提供高密度的硬核資訊。絕對不能吐出長文！\n` +
+        `- **條列重點**：所有分析一律提煉精華，以粗體與條列式呈現，確保 30 秒內能快速讀完。\n\n` +
+        backgroundSection +
+        `## 智能客製化字數與長度控制\n` +
+        `- **如果是「一般資產概況查詢、問候、常規提問（例如：今天我的資產如何、目前現況）」**：\n` +
+        `  - 嚴格限制回答長度在 *3 句話或 150 字內*。\n` +
+        `  - 直接以極簡條例報告：1. 加總市值與現金的大致狀況 2. 近期最重要的一筆領息（如有）或核心建議 3. 提示目前剩餘現金。其餘一律不寫，節省 Token 並加速閱讀！\n` +
+        `- **如果是針對「特定股票分析、買賣點、估值分析、動態資產平衡、具體策略提問」**：\n` +
+        `  - 採用下面的分析框架，但也必須精煉字句，禁止水分拉長。\n\n` +
+        `## 深度股票分析框架（僅在分析特定個股/策略時啟用）\n` +
+        `當提出特定股票、ETF 或市場分析時，請結合上述「個人資產背景」，快速評估：\n` +
         `1. **基本面**：營收成長、毛利、EPS、估值合理性。\n` +
         `2. **技術與籌碼面**：均線趨勢、支撐/壓力位、大戶資金流向。\n` +
         `3. **風險評估**：產業下行風險、總經環境變化。\n\n` +
-        `## 輸出格式規範（嚴格遵守，禁止超出此框架）\n` +
+        `## 深度股票分析輸出格式規範（僅在分析特定個股/策略時適用，嚴格遵守，字句極簡）：\n` +
         `- **核心結論**：[看多/看空/中立觀望] + 一句話主因。\n` +
-        `- **關鍵重點**：粗體條列 2-3 個關鍵數據或事實，刪除所有修飾詞。\n` +
+        `- **關鍵重點**：粗體條列 2 個關鍵數據或事實，刪除所有贅詞。\n` +
         `- **實際操作建議**：\n` +
         `  - 長線：結合目前資產與持股狀況，給出具體加減碼或續抱策略。\n` +
-        `  - 短線：明確的進場觀察點、支撐位與壓力位。\n` +
-        `- **關鍵風險提示**：1 個最需緊盯的警訊或明確的轉弱停損觸發條件。`;
+        `  - 短線：明確的進場觀察點或支撐/壓力位。\n` +
+        `- **關鍵風險提示**：1 個最需緊盯的警訊或明確的停損觸發點。`;
 
       let response;
-      const modelsToTry = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
+      const modelsToTry = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
       let lastErr: any = null;
 
       for (const modelName of modelsToTry) {
@@ -295,9 +352,9 @@ async function startServer() {
           } catch (err: any) {
             retries--;
             lastErr = err;
-            console.error(`Gemini call failed for model ${modelName} (retries left: ${retries}):`, err.message || err);
+            console.warn(`[Gemini Backoff] Busy status for model ${modelName} (retries left: ${retries}):`, err.message || err);
             if (retries > 0) {
-              await new Promise(resolve => setTimeout(resolve, 3000));
+              await new Promise(resolve => setTimeout(resolve, 2000));
             }
           }
         }
@@ -315,7 +372,7 @@ async function startServer() {
       await sendTelegramMsg(chatId, replyText);
 
     } catch (err: any) {
-      console.error("Gemini Telegram answering error:", err);
+      console.error("Gemini Telegram answering error:", err.message || err);
       try {
         const errMsg = `⚠️ *機器人服務暫時出現小狀況* ⚠️\n\n` +
           `我們在處理您的提問時遇到異常，可能原因為：\n` +
@@ -360,7 +417,10 @@ async function startServer() {
         return res.sendStatus(200);
       }
       
-      await processTelegramMessage(botToken, msg);
+      // Process the message asynchronously to send response immediately back to Telegram (avoids webhook timeout retries)
+      processTelegramMessage(botToken, msg).catch((err) => {
+        console.warn(`[Webhook Async Error] Failed to process message for ChatID ${chatId}:`, err.message || err);
+      });
     } catch (err) {
       console.error("Error inside Webhook receiver middleware:", err);
     }
@@ -484,6 +544,11 @@ async function startServer() {
   }
 
   async function startTelegramPolling() {
+    if (process.env.NODE_ENV === "production") {
+      console.log("🚀 [Telegram Bot] Production environment detected (NODE_ENV=production). Background Polling (getUpdates) is completely disabled to protect Webhook mode and prevent dual-instance double-replies.");
+      return;
+    }
+
     console.log("🤖 [Telegram Bot] Activating multi-bot outbound long polling loop... Immune to 302 Redirect!");
     
     // Explicitly delete webhook on startup ONLY for polling bots (do not break production Webhook)

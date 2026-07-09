@@ -23,6 +23,7 @@ export type DividendInfo = {
   sourceUrl?: string;
   isPaymentDateEstimated?: boolean;
   status?: string;
+  history?: any[];
 }
 
 export type StockEntry = {

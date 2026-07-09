@@ -53,13 +53,13 @@ export interface TwseData {
 }
 
 /**
- * 從 Yahoo 股市抓取除權息資料
+ * 從 Yahoo 股市抓取除權息歷史資料
  */
-async function fetchDividendFromYahoo(symbol: string, isOtc: boolean): Promise<{ exDate: string, amount: number, paymentDate: string } | null> {
+async function fetchDividendListFromYahoo(symbol: string, isOtc: boolean): Promise<{ date: string, amount: number, year: number, paymentDate: string }[]> {
   try {
     const suffix = isOtc ? ".TWO" : ".TW";
     const url = `https://tw.stock.yahoo.com/quote/${symbol}${suffix}/dividend`;
-    console.log(`[Yahoo] 正在抓取除權息資料: ${url}`);
+    console.log(`[Yahoo History] 正在抓取除權息歷史: ${url}`);
     
     const res = await axios.get(url, {
       headers: {
@@ -73,58 +73,40 @@ async function fetchDividendFromYahoo(symbol: string, isOtc: boolean): Promise<{
     });
 
     const $ = cheerio.load(res.data);
-    
-    // Yahoo 股市的結構：
-    // 每一列是一個 li，裡面有多個 div
-    // 我們找第一個數據列 (通常是最近一次)
-    // 結構可能如下:
-    // <li class="List(n) ...">
-    //   <div ...>2024/04/18</div> <!-- 除息日 -->
-    //   <div ...>-</div>          <!-- 除權日 -->
-    //   <div ...>0.79</div>       <!-- 現金股利 -->
-    //   <div ...>0</div>          <!-- 股票股利 -->
-    //   <div ...>2024/05/15</div> <!-- 現金發放日 -->
-    // </li>
-
     const rows = $('ul.List\\(n\\) > li.List\\(n\\)');
-    if (rows.length === 0) return null;
+    const dividends: { date: string, amount: number, year: number, paymentDate: string }[] = [];
 
-    // 排除標題列與年度統計列，尋找包含除息日期的數據列
-    let targetRow: any = null;
     rows.each((i, el) => {
       const cells = $(el).find('div');
-      // 根據觀察，數據列通常有 10 個以上的 div
-      // 索引 8 通常是除息日 (YYYY/MM/DD)
-      if (cells.length >= 9) {
+      if (cells.length >= 11) {
+        const periodText = $(cells[3]).text().trim();
         const dateText = $(cells[8]).text().trim();
-        if (/\d{4}\/\d{2}\/\d{2}/.test(dateText) && !targetRow) {
-          targetRow = el;
+        const amountText = $(cells[4]).text().trim();
+        const payDateText = $(cells[10]).text().trim();
+
+        // 僅解析帶有季度/年度期別 (例如 "2026Q1") 與有效除息日格式的資料行
+        if (periodText && /\d{4}\/\d{2}\/\d{2}/.test(dateText)) {
+          const exDate = dateText.replace(/\//g, '-');
+          const amount = parseFloat(amountText) || 0;
+          const paymentDate = payDateText && payDateText !== '-' ? payDateText.replace(/\//g, '-') : '';
+          const year = parseInt(exDate.split('-')[0]) || new Date().getFullYear();
+
+          if (exDate && amount > 0) {
+            dividends.push({
+              date: exDate,
+              amount: amount,
+              year: year,
+              paymentDate: paymentDate
+            });
+          }
         }
       }
     });
 
-    if (!targetRow) return null;
-
-    const cells = $(targetRow).find('div');
-    // 修正後的索引：
-    // 4: 現金股利
-    // 8: 除息日
-    // 10: 現金發放日
-    
-    const exDate = $(cells[8]).text().trim().replace(/\//g, '-');
-    const amount = parseFloat($(cells[4]).text().trim()) || 0;
-    const paymentDate = $(cells[10]).text().trim().replace(/\//g, '-');
-
-    if (!exDate || isNaN(amount)) return null;
-
-    return {
-      exDate,
-      amount,
-      paymentDate: paymentDate === '-' ? "" : paymentDate
-    };
+    return dividends;
   } catch (error: any) {
-    console.warn(`[Yahoo] 抓取 ${symbol} 失敗: ${error.message || error}`);
-    return null;
+    console.warn(`[Yahoo History] 抓取 ${symbol} 失敗: ${error.message || error}`);
+    return [];
   }
 }
 
@@ -162,11 +144,16 @@ export async function fetchDividendFromHiStock(symbol: string): Promise<any[]> {
         // A simple heuristic: if exDate is early in the year (e.g., 01/xx), it's likely the payYear.
         // If it's late in the year (e.g., 10/xx), it's likely the fiscal year.
         
+        // HiStock's 'payYear' column is the Western year of the ex-dividend date.
+        // We should always use the Western year 'payYear' to avoid Minguo years (like 114) or string suffixes (like 114Q4).
         let yearToUse = parseInt(payYear);
-        const month = parseInt(exDate.split('/')[0]);
-        if (month >= 4 && month <= 12) {
-          // Likely fiscal year
-          yearToUse = parseInt(year);
+        if (isNaN(yearToUse) || yearToUse < 1000) {
+          const minguoYear = parseInt(year);
+          if (!isNaN(minguoYear)) {
+            yearToUse = minguoYear < 1000 ? minguoYear + 1911 : minguoYear;
+          } else {
+            yearToUse = new Date().getFullYear();
+          }
         }
         
         const formattedDate = `${yearToUse}-${exDate.replace(/\//g, '-')}`;
@@ -179,8 +166,8 @@ export async function fetchDividendFromHiStock(symbol: string): Promise<any[]> {
     });
 
     return dividends;
-  } catch (error) {
-    console.error(`[HiStock] 抓取 ${symbol} 失敗:`, error);
+  } catch (error: any) {
+    console.warn(`[HiStock] 抓取 ${symbol} 失敗: ${error.message || error}`);
     return [];
   }
 }
@@ -255,16 +242,8 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
     let finalSymbol = cleanSymbol;
     let isOtc = false;
 
-    // 優先嘗試從 Yahoo 抓取即時股價
-    const yahooPriceData = await fetchPriceFromYahoo(cleanSymbol);
-    if (yahooPriceData) {
-      currentPrice = yahooPriceData.price;
-      stockName = yahooPriceData.name;
-      console.log(`[Yahoo Price] 成功抓取 ${cleanSymbol}: ${currentPrice}`);
-    }
-
-    // 無論 Yahoo 是否成功，都嘗試從證交所/上櫃清單比對，以取得正確的股號(Code)與股名(Name)
-    // 這能解決輸入「長榮」但股號顯示「長榮」而非「2603」的問題
+    // 先從證交所/上櫃清單比對，以取得正確的股號(Code)與股名(Name)
+    // 這能解決輸入「長榮」或「上詮」但股號顯示中文名稱而非「2603」/「3363」的問題，也能避免直接用中文去查 Yahoo 報價導致 400 錯誤
     try {
       const priceResTwse = await axios.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", { timeout: 10000 });
       if (Array.isArray(priceResTwse.data)) {
@@ -274,7 +253,7 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
           (cleanSymbol.length >= 2 && item.Name.startsWith(cleanSymbol))
         );
         if (priceTarget) {
-          if (currentPrice === 0) currentPrice = parseFloat(priceTarget.ClosingPrice);
+          currentPrice = parseFloat(priceTarget.ClosingPrice) || 0;
           stockName = priceTarget.Name;
           finalSymbol = priceTarget.Code;
           isOtc = false;
@@ -292,7 +271,7 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
             (cleanSymbol.length >= 2 && item.CompanyName.startsWith(cleanSymbol))
           );
           if (priceTarget) {
-            if (currentPrice === 0) currentPrice = parseFloat(priceTarget.Close);
+            currentPrice = parseFloat(priceTarget.Close) || 0;
             stockName = priceTarget.CompanyName;
             finalSymbol = priceTarget.SecuritiesCompanyCode;
             isOtc = true;
@@ -305,9 +284,12 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
       try {
         const priceResTpexBond = await axios.get("https://www.tpex.org.tw/openapi/v1/tpex_bond_etf_quotes", { timeout: 10000 });
         if (Array.isArray(priceResTpexBond.data)) {
-          priceTarget = priceResTpexBond.data.find((item: any) => item.SecuritiesCompanyCode === cleanSymbol || item.CompanyName === cleanSymbol);
+          priceTarget = priceResTpexBond.data.find((item: any) => 
+            item.SecuritiesCompanyCode === cleanSymbol || 
+            item.CompanyName === cleanSymbol
+          );
           if (priceTarget) {
-            if (currentPrice === 0) currentPrice = parseFloat(priceTarget.ClosePrice);
+            currentPrice = parseFloat(priceTarget.ClosePrice) || 0;
             stockName = priceTarget.CompanyName;
             finalSymbol = priceTarget.SecuritiesCompanyCode;
             isOtc = true;
@@ -316,11 +298,27 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
       } catch (e) { console.warn("[TPEx Bond] 列表抓取失敗"); }
     }
 
+    // 當解決正確的 finalSymbol 之後，非 ASCII (例如仍未被解析的中文名字) 則不要直接丟給 Yahoo 查詢，避免 400 錯誤。
+    // 如果是乾淨的英文/數字（如已成功解析的 "3363" 或原先輸入的 "0050"），再向 Yahoo 抓取最即時的即時報價與正確完整的股票名稱。
+    const hasNonAscii = /[^\x00-\x7F]/.test(finalSymbol);
+    if (!hasNonAscii) {
+      const yahooPriceData = await fetchPriceFromYahoo(finalSymbol);
+      if (yahooPriceData) {
+        currentPrice = yahooPriceData.price;
+        if (yahooPriceData.name && (!stockName || stockName === "未知股票" || stockName === finalSymbol)) {
+          stockName = yahooPriceData.name;
+        }
+        console.log(`[Yahoo Price] 成功抓取 ${finalSymbol}: ${currentPrice}`);
+      }
+    } else {
+      console.log(`[Yahoo Price] 略過中文/非法字元 ${finalSymbol}（不執行直接查詢以避免 400 錯誤）`);
+    }
+
     if (currentPrice === 0) return null;
 
     // 2. 抓取除權息資料
     const hiStockDividends = await fetchDividendFromHiStock(finalSymbol);
-    const yahooDividend = await fetchDividendFromYahoo(finalSymbol, isOtc);
+    const yahooDividends = await fetchDividendListFromYahoo(finalSymbol, isOtc);
     
     let exDate = "";
     let amount = 0;
@@ -339,23 +337,25 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
     // 整合 HiStock 與 Yahoo 的資料
     const allDividends = [...(hiStockDividends || [])];
     
-    // 如果 Yahoo 有最新資料，且不在 HiStock 歷史中，則加入
-    if (yahooDividend && yahooDividend.exDate) {
-      const exists = allDividends.some(d => d.date === yahooDividend.exDate);
-      if (!exists) {
-        allDividends.push({
-          date: yahooDividend.exDate,
-          amount: yahooDividend.amount,
-          year: parseInt(yahooDividend.exDate.split('-')[0]),
-          paymentDate: yahooDividend.paymentDate // 記錄 Yahoo 的發放日
-        });
-      } else {
-        // 如果已存在，更新發放日資訊
-        const existing = allDividends.find(d => d.date === yahooDividend.exDate);
-        if (existing && yahooDividend.paymentDate) {
-          existing.paymentDate = yahooDividend.paymentDate;
+    // 如果 Yahoo 有最新或歷史資料，整合進來
+    if (yahooDividends && yahooDividends.length > 0) {
+      yahooDividends.forEach(yd => {
+        const exists = allDividends.some(d => d.date === yd.date);
+        if (!exists) {
+          allDividends.push({
+            date: yd.date,
+            amount: yd.amount,
+            year: yd.year,
+            paymentDate: yd.paymentDate
+          });
+        } else {
+          // 如果已存在，更新發放日資訊
+          const existing = allDividends.find(d => d.date === yd.date);
+          if (existing && yd.paymentDate) {
+            existing.paymentDate = yd.paymentDate;
+          }
         }
-      }
+      });
     }
 
     // 依日期降冪排序 (最新的在前面)
@@ -446,13 +446,13 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
       yield: currentPrice > 0 ? parseFloat(((amount / currentPrice) * 100).toFixed(2)) : 0,
       receivedAmount: receivedAmount,
       pendingAmount: pendingAmount,
-      history: hiStockDividends || [],
+      history: sortedDividends || [],
       monthlyDistribution,
       pendingMonthlyDistribution
     };
 
-  } catch (error) {
-    console.error("[twseService] 抓取失敗:", error);
+  } catch (error: any) {
+    console.warn("[twseService] 抓取失敗:", error.message || error);
     return null;
   }
 }
