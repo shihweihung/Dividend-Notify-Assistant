@@ -280,7 +280,7 @@ function MainApp() {
         try {
           await fetch('/api/telegram/save-chat-data', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_API_SECRET_KEY },
             body: JSON.stringify({
               chatId: telegramChatId,
               botToken: telegramBotToken,
@@ -306,7 +306,7 @@ function MainApp() {
         try {
           const response = await fetch('/api/telegram/register-webhook', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_API_SECRET_KEY },
             body: JSON.stringify({
               botToken: telegramBotToken,
               baseUrl: window.location.origin
@@ -484,7 +484,7 @@ function MainApp() {
       }
 
       if (!info) {
-        const response = await fetch(`/api/dividend/${newSymbol}`);
+        const response = await fetch(`/api/dividend/${newSymbol}`, { headers: { 'x-api-key': import.meta.env.VITE_API_SECRET_KEY } });
         if (!response.ok) {
           const errData = await response.json();
           throw new Error(errData.error || '查詢失敗');
@@ -637,7 +637,7 @@ function MainApp() {
 
       // If no cache or forcing API, fetch from server
       if (!info) {
-        const response = await fetch(`/api/dividend/${symbol}`);
+        const response = await fetch(`/api/dividend/${symbol}`, { headers: { 'x-api-key': import.meta.env.VITE_API_SECRET_KEY } });
         if (!response.ok) {
           const errData = await response.json();
           throw new Error(errData.error || '查詢失敗');
@@ -785,7 +785,7 @@ function MainApp() {
           if (i > 0) await new Promise(resolve => setTimeout(resolve, 500));
           
           incrementApiUsage();
-          const response = await fetch(`/api/dividend/${stock.symbol}`);
+          const response = await fetch(`/api/dividend/${stock.symbol}`, { headers: { 'x-api-key': import.meta.env.VITE_API_SECRET_KEY } });
           if (!response.ok) {
             const errData = await response.json();
             throw new Error(errData.error || '查詢失敗');
@@ -838,7 +838,7 @@ function MainApp() {
   const handleRefreshStock = async (stock: StockEntry) => {
     setRefreshingStocks(prev => new Set(prev).add(stock.symbol));
     try {
-      const response = await fetch(`/api/dividend/${stock.symbol}`);
+      const response = await fetch(`/api/dividend/${stock.symbol}`, { headers: { 'x-api-key': import.meta.env.VITE_API_SECRET_KEY } });
       if (!response.ok) {
         const errData = await response.json();
         throw new Error(errData.error || '查詢失敗');
@@ -1309,7 +1309,7 @@ function MainApp() {
       try {
         const response = await fetch('/api/telegram/register-webhook', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_API_SECRET_KEY },
           body: JSON.stringify({
             botToken: token,
             baseUrl: window.location.origin
@@ -1385,6 +1385,7 @@ function MainApp() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'x-api-key': import.meta.env.VITE_API_SECRET_KEY,
         },
         body: JSON.stringify({
           botToken: telegramBotToken,

@@ -5,6 +5,7 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
 import admin from "firebase-admin";
+import { getFirestore } from "firebase-admin/firestore";
 
 const __dirname = process.cwd();
 
@@ -18,47 +19,81 @@ async function startServer() {
   if (fs.existsSync(fbConfigPath)) {
     try {
       const firebaseConfig = JSON.parse(fs.readFileSync(fbConfigPath, "utf-8"));
-      admin.initializeApp({
+      const app = admin.initializeApp({
         projectId: firebaseConfig.projectId,
       });
-      adminDb = admin.firestore(firebaseConfig.firestoreDatabaseId);
-      console.log(`[Firebase Admin] Fully initialized with Database ID: ${firebaseConfig.firestoreDatabaseId}`);
+      adminDb = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+      console.log(`[Firebase Admin] Fully initialized with Project ID: ${firebaseConfig.projectId}, Database ID: ${firebaseConfig.firestoreDatabaseId}`);
     } catch (fbErr) {
       console.error("[Firebase Admin] Initialization failed:", fbErr);
     }
   }
 
+  async function sendTelegramMsg(botToken: string, toChatId: number, textToSend: string) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: toChatId,
+          text: textToSend,
+          parse_mode: "Markdown",
+        }),
+      });
+      return response;
+    } catch (err) {
+      console.error("Telegram error:", err);
+    }
+  }
+
+  const getChatFromFirestore = async (chatId: string) => {
+    const doc = await adminDb.collection("telegram_chats").doc(chatId).get();
+    return doc.exists ? doc.data() : null;
+  };
+
+  const saveChatToFirestore = async (chatId: string, data: any) => {
+    await adminDb.collection("telegram_chats").doc(chatId).set({
+      ...data,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  };
+
+  // Migrate JSON DB to Firestore
+  const dbPath = path.join(process.cwd(), "telegram_chats_db.json");
+  if (fs.existsSync(dbPath)) {
+    try {
+      const dbData = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
+      for (const chatId in dbData) {
+        await adminDb.collection("telegram_chats").doc(chatId).set(dbData[chatId]);
+      }
+      fs.unlinkSync(dbPath);
+      console.log("Migration complete: telegram_chats_db.json -> Firestore");
+    } catch (e) {
+      console.error("Migration error:", e);
+    }
+  }
+
   app.use(express.json());
 
-  app.get("/api/debug-env", (req, res) => {
-    res.json({
-      customKeyLength: process.env.CUSTOM_GEMINI_API_KEY?.length,
-      customKeyPrefix: process.env.CUSTOM_GEMINI_API_KEY?.substring(0, 4),
-      systemKeyLength: process.env.GEMINI_API_KEY?.length,
-      systemKeyPrefix: process.env.GEMINI_API_KEY?.substring(0, 4),
-    });
-  });
+  const apiKeyAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey && apiKey === process.env.API_SECRET_KEY) {
+      next();
+    } else {
+      res.status(401).json({ error: 'Unauthorized: Invalid or missing API key' });
+    }
+  };
 
   // API: Save / Sync Telegram Chat Data
-  app.post("/api/telegram/save-chat-data", (req, res) => {
+  app.post("/api/telegram/save-chat-data", apiKeyAuth, async (req, res) => {
     try {
       const { chatId, botToken, cash, stocks, username } = req.body;
       if (!chatId) {
         return res.status(400).json({ error: "缺少必要參數：chatId" });
       }
 
-      const dbPath = path.join(process.cwd(), "telegram_chats_db.json");
-      let dbData: Record<string, any> = {};
-      if (fs.existsSync(dbPath)) {
-        try {
-          dbData = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
-        } catch (e) {
-          console.error("Error reading telegram JSON db:", e);
-        }
-      }
-
-      const existing = dbData[String(chatId)] || {};
-      dbData[String(chatId)] = {
+      const existing = (await getChatFromFirestore(String(chatId))) || {};
+      const updatedData = {
         chatId: String(chatId),
         botToken: botToken || existing.botToken || process.env.TELEGRAM_BOT_TOKEN,
         cash: cash !== undefined ? Number(cash) : (existing.cash || 0),
@@ -66,10 +101,9 @@ async function startServer() {
         username: username || existing.username || "投資大師",
         isWebhookMode: existing.isWebhookMode || false,
         baseUrl: existing.baseUrl || "",
-        updatedAt: new Date().toISOString()
       };
 
-      fs.writeFileSync(dbPath, JSON.stringify(dbData, null, 2), "utf-8");
+      await saveChatToFirestore(String(chatId), updatedData);
       return res.json({ success: true });
     } catch (err: any) {
       console.error("Error saving chat data:", err);
@@ -78,7 +112,7 @@ async function startServer() {
   });
 
   // API: Send Telegram Alert / Report
-  app.post("/api/telegram/send", async (req, res) => {
+  app.post("/api/telegram/send", apiKeyAuth, async (req, res) => {
     const { botToken, chatId, message } = req.body;
 
     if (!botToken || !chatId || !message) {
@@ -113,34 +147,32 @@ async function startServer() {
     }
   });
 
-  // Keep track of recently processed message IDs to prune duplicate Telegram retry payloads
-  const processedMessageIds = new Map<string, number>();
-
-  // Prune processed message IDs older than 10 minutes every 5 minutes
-  setInterval(() => {
-    const now = Date.now();
-    for (const [key, timestamp] of processedMessageIds.entries()) {
-      if (now - timestamp > 600000) {
-        processedMessageIds.delete(key);
-      }
-    }
-  }, 300000);
-
   // Helper: Process Telegram Message (shared by Webhook and Polling)
   async function processTelegramMessage(botToken: string, msg: any) {
     if (!msg || !msg.chat || !msg.chat.id) return;
     const chatId = msg.chat.id;
     const msgId = msg.message_id;
 
-    // Discard duplicates immediately to prevent duplicate API costs
-    if (msgId) {
-      const dedupKey = `${chatId}_${msgId}`;
-      if (processedMessageIds.has(dedupKey)) {
-        console.log(`[Telegram Bot Dedup] Already processed message ${msgId} for ChatID ${chatId}. Discarding duplicate.`);
-        return;
-      }
-      processedMessageIds.set(dedupKey, Date.now());
+    // 1. Deduplication & Rate Limiting
+    const now = Date.now();
+    const dedupDocRef = adminDb.collection("processed_messages").doc(`${chatId}_${msgId}`);
+    const dedupDoc = await dedupDocRef.get();
+    if (dedupDoc.exists && now - dedupDoc.data()!.timestamp < 600000) {
+      console.log(`[Telegram Bot Dedup] Already processed message ${msgId} for ChatID ${chatId}. Discarding duplicate.`);
+      return;
     }
+    await dedupDocRef.set({ timestamp: now });
+
+    const rateLimitRef = adminDb.collection("rate_limits").doc(String(chatId));
+    const rateLimitDoc = await rateLimitRef.get();
+    let timestamps = rateLimitDoc.exists ? (rateLimitDoc.data()!.timestamps || []) : [];
+    timestamps = timestamps.filter((ts: number) => now - ts < 60000);
+    if (timestamps.length >= 3) {
+      await sendTelegramMsg(botToken, chatId, "請稍後再試");
+      return;
+    }
+    timestamps.push(now);
+    await rateLimitRef.set({ timestamps });
 
     const text = (msg.text || "").trim();
     const username = msg.from?.first_name || msg.from?.username || msg.from?.last_name || "投資大師";
@@ -152,24 +184,14 @@ async function startServer() {
     let foundInFirestore = false;
     let finalUsername = username;
 
-    // 1. Primary Lookup: Local JSON database (Highly synchronized with React frontend active state, supports both guest & logged in users)
-    const dbPath = path.join(process.cwd(), "telegram_chats_db.json");
-    let dbData: Record<string, any> = {};
-    if (fs.existsSync(dbPath)) {
-      try {
-        dbData = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
-      } catch (e) {
-        console.error("Error reading JSON db during message processing:", e);
-      }
-    }
-    const chatInfo = dbData[String(chatId)];
-    // Make sure we have a real record with actual active assets or custom username to prioritize it
+    // 1. Lookup: Firestore
+    const chatInfo = await getChatFromFirestore(String(chatId));
     if (chatInfo && (chatInfo.stocks?.length > 0 || chatInfo.cash > 0 || (chatInfo.username && chatInfo.username !== "投資大師"))) {
       stocks = chatInfo.stocks || [];
       cash = Number(chatInfo.cash || 0);
       finalUsername = chatInfo.username || username;
       foundInFirestore = true;
-      console.log(`[Telegram Bot DB Lookup] Loaded ${stocks.length} stocks and $${cash} cash from local JSON file (primary/cache).`);
+      console.log(`[Telegram Bot DB Lookup] Loaded ${stocks.length} stocks and $${cash} cash from Firestore.`);
     }
 
     // 2. Secondary Fallback: Cloud Firestore DB
@@ -198,46 +220,8 @@ async function startServer() {
       }
     }
 
-    const sendTelegramMsg = async (toChatId: number, textToSend: string) => {
-      try {
-        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: toChatId,
-            text: textToSend,
-            parse_mode: "Markdown",
-          }),
-        });
 
-        // Telegram might return 400 Bad Request for Markdown parsing issues
-        if (!response.ok) {
-          const errData = await response.json().catch(() => ({}));
-          console.warn(`[Telegram Send Warning] Failed to send message with Markdown parsing for ChatID ${toChatId}. Error:`, errData);
-          
-          // Fallback retry without Markdown format (send as safe plain-text)
-          console.log(`[Telegram Send Retry] Retrying message delivery in plain-text mode...`);
-          const retryResponse = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id: toChatId,
-              text: textToSend,
-            }),
-          });
-          
-          if (!retryResponse.ok) {
-            const finalErrDetail = await retryResponse.json().catch(() => ({}));
-            console.error(`[Telegram Send Error] Safe fallback retry also failed for ChatID ${toChatId}:`, finalErrDetail);
-          } else {
-            console.log(`[Telegram Send Success] Safe fallback message delivered successfully in plain-text.`);
-          }
-        }
-      } catch (err) {
-        console.error("Error sending message back to Telegram:", err);
-      }
-    };
-
+    // Send welcome message if user not found
     if (!foundInFirestore) {
       // User is not connected yet
       const helpMessage = `👋 哈囉 ${username}！\n\n` +
@@ -249,7 +233,7 @@ async function startServer() {
         `2️⃣ 前往「息引力」網頁，點擊右上角「通知偏好」或「通知與推播設定」按鈕。\n` +
         `3️⃣ 在「Telegram Chat ID」輸入框中貼上，點擊「儲存設定」，即可立即喚醒您的雙向智慧對話大門！🚀`;
       
-      await sendTelegramMsg(chatId, helpMessage);
+      await sendTelegramMsg(botToken, chatId, helpMessage);
       return;
     }
 
@@ -263,7 +247,7 @@ async function startServer() {
         `📈 *「分析我的持股持倉」*\n` +
         `🎯 *「如何做好我的動態資產平衡？」*\n\n` +
         `直接在下方輸入區輸入您的問題，隨時看子彈到位、聽策略叮嚀！👇`;
-      await sendTelegramMsg(chatId, welcomeText);
+      await sendTelegramMsg(botToken, chatId, welcomeText);
       return;
     }
 
@@ -283,8 +267,10 @@ async function startServer() {
         }
       });
 
-      const stocksSummary = stocks && stocks.length > 0
-        ? stocks.map((s: any) => {
+      const stocksList = stocks || [];
+      const isTruncated = stocksList.length > 20;
+      const stocksSummary = stocksList.length > 0
+        ? stocksList.slice(0, 20).map((s: any) => {
             const name = s.name || s.symbol;
             const shares = s.shares || 0;
             const divInfo = s.dividendInfo;
@@ -298,7 +284,7 @@ async function startServer() {
               }
             }
             return `- ${name} (${s.symbol}): ${shares} 股${extra}`;
-          }).join("\n")
+          }).join("\n") + (isTruncated ? "\n... (省略其餘持股)" : "")
         : "目前持股列表中尚無持股數據（若您剛加入，可返回網頁重新加載以觸發最新的同步）。";
 
       const backgroundSection = `## 當前個人資產背景\n` +
@@ -346,6 +332,7 @@ async function startServer() {
               config: {
                 systemInstruction: systemInstruction,
                 temperature: 0.7,
+                maxOutputTokens: 800,
               },
             });
             break;
@@ -369,7 +356,7 @@ async function startServer() {
       }
 
       const replyText = response.text || "抱歉，我的思考核心目前忙碌中，請稍候再試。";
-      await sendTelegramMsg(chatId, replyText);
+      await sendTelegramMsg(botToken, chatId, replyText);
 
     } catch (err: any) {
       console.error("Gemini Telegram answering error:", err.message || err);
@@ -380,7 +367,7 @@ async function startServer() {
           `2. AI 思考連線逾時\n\n` +
           `*錯誤明細：*\n\`${err.message || err}\`\n\n` +
           `💡 請您返回「息引力」頁面，檢查您的自訂 AI 金鑰設定、或是稍微等候再嘗試向我提問。謝謝您的體諒！`;
-        await sendTelegramMsg(chatId, errMsg);
+        await sendTelegramMsg(botToken, chatId, errMsg);
       } catch (sendErr) {
         console.error("Failed to forward Telegram error message back to user:", sendErr);
       }
@@ -389,6 +376,9 @@ async function startServer() {
 
   // API: Telegram Webhook Receiver (Bidirectional Interaction - Webhook Mode / Callback fallback)
   app.post("/api/telegram/webhook", async (req, res) => {
+    if (req.headers['x-telegram-bot-api-secret-token'] !== process.env.API_SECRET_KEY) {
+      return res.sendStatus(403);
+    }
     try {
       const { message, edited_message } = req.body;
       const msg = message || edited_message;
@@ -400,16 +390,9 @@ async function startServer() {
       
       // Look up bot token in DB for this Chat ID to support custom bot tokens
       let botToken = process.env.TELEGRAM_BOT_TOKEN;
-      try {
-        const dbPath = path.join(process.cwd(), "telegram_chats_db.json");
-        if (fs.existsSync(dbPath)) {
-          const dbData = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
-          if (dbData[chatId] && dbData[chatId].botToken) {
-            botToken = dbData[chatId].botToken;
-          }
-        }
-      } catch (dbErr) {
-        console.error("Error reading db in webhook look up:", dbErr);
+      const chatInfo = await getChatFromFirestore(chatId);
+      if (chatInfo && chatInfo.botToken) {
+        botToken = chatInfo.botToken;
       }
 
       if (!botToken) {
@@ -417,10 +400,8 @@ async function startServer() {
         return res.sendStatus(200);
       }
       
-      // Process the message asynchronously to send response immediately back to Telegram (avoids webhook timeout retries)
-      processTelegramMessage(botToken, msg).catch((err) => {
-        console.warn(`[Webhook Async Error] Failed to process message for ChatID ${chatId}:`, err.message || err);
-      });
+      // Process the message synchronously
+      await processTelegramMessage(botToken, msg);
     } catch (err) {
       console.error("Error inside Webhook receiver middleware:", err);
     }
@@ -428,7 +409,7 @@ async function startServer() {
   });
 
   // API: Register Telegram Webhook (Dynamic Selection based on Host Environment)
-  app.post("/api/telegram/register-webhook", async (req, res) => {
+  app.post("/api/telegram/register-webhook", apiKeyAuth, async (req, res) => {
     let { botToken, baseUrl } = req.body;
     if (!botToken) {
       return res.status(400).json({ error: "缺少 botToken" });
@@ -445,13 +426,13 @@ async function startServer() {
       }
 
       // Find any chats matching this bot token and update their mode
-      for (const chatId in dbData) {
-        if (dbData[chatId].botToken === botToken) {
-          dbData[chatId].isWebhookMode = !isDev;
-          dbData[chatId].baseUrl = baseUrl || "";
-        }
+      const snapshot = await adminDb.collection("telegram_chats").where("botToken", "==", botToken).get();
+      for (const doc of snapshot.docs) {
+        await doc.ref.update({
+          isWebhookMode: !isDev,
+          baseUrl: baseUrl || ""
+        });
       }
-      fs.writeFileSync(dbPath, JSON.stringify(dbData, null, 2), "utf-8");
 
       if (isDev) {
         // Dev: Remove webhook and use polling mode
@@ -466,7 +447,7 @@ async function startServer() {
       } else {
         // Prod / Shared link: Register a public webhook url
         const webhookUrl = `${baseUrl.replace(/\/$/, "")}/api/telegram/webhook`;
-        const setUrl = `https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`;
+        const setUrl = `https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}&secret_token=${process.env.API_SECRET_KEY}`;
         const setRes = await fetch(setUrl);
         const setData: any = await setRes.json();
         
@@ -509,29 +490,26 @@ async function startServer() {
     }
   }
 
-  function getActivePollingBotTokens(): string[] {
+  async function getActivePollingBotTokens(): Promise<string[]> {
     const defaultBotToken = process.env.TELEGRAM_BOT_TOKEN;
     const tokens = new Set<string>();
     
     let defaultIsWebhook = false;
 
     try {
-      const dbPath = path.join(process.cwd(), "telegram_chats_db.json");
-      if (fs.existsSync(dbPath)) {
-        const dbData = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
-        for (const key in dbData) {
-          const chat = dbData[key];
-          if (chat.botToken) {
-            if (chat.isWebhookMode) {
-              if (chat.botToken === defaultBotToken) {
-                defaultIsWebhook = true;
-              }
-            } else {
-              tokens.add(chat.botToken);
+      const snapshot = await adminDb.collection("telegram_chats").get();
+      snapshot.docs.forEach((doc: any) => {
+        const chat = doc.data();
+        if (chat.botToken) {
+          if (chat.isWebhookMode) {
+            if (chat.botToken === defaultBotToken) {
+              defaultIsWebhook = true;
             }
+          } else {
+            tokens.add(chat.botToken);
           }
         }
-      }
+      });
     } catch (e) {
       console.error("Error retrieving dynamic bot tokens:", e);
     }
@@ -552,7 +530,7 @@ async function startServer() {
     console.log("🤖 [Telegram Bot] Activating multi-bot outbound long polling loop... Immune to 302 Redirect!");
     
     // Explicitly delete webhook on startup ONLY for polling bots (do not break production Webhook)
-    const tokens = getActivePollingBotTokens();
+    const tokens = await getActivePollingBotTokens();
     for (const token of tokens) {
       try {
         console.log(`🤖 [Telegram Bot] Deactivating Webhooks to switch to getUpdates for bot: ${token.substring(0, 12)}...`);
@@ -565,7 +543,7 @@ async function startServer() {
     }
 
     const pollingEngineLoop = async () => {
-      const activeTokens = getActivePollingBotTokens();
+      const activeTokens = await getActivePollingBotTokens();
       for (const token of activeTokens) {
         await pollBotUpdates(token);
       }
@@ -579,7 +557,7 @@ async function startServer() {
   startTelegramPolling();
 
   // API: Fetch Dividend Data via Gemini
-  app.get("/api/dividend/:symbol", async (req, res) => {
+  app.get("/api/dividend/:symbol", apiKeyAuth, async (req, res) => {
     const { symbol } = req.params;
     const apiKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
     
