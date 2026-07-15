@@ -1110,6 +1110,134 @@ function MainApp() {
     return { received, pending, total, distributionData, monthlyData };
   }, [stocks, selectedYear]);
 
+  const yearlyHistoryData = useMemo(() => {
+    const today = startOfToday();
+    const currentYear = today.getFullYear();
+    const todayStr = format(today, 'yyyy-MM-dd');
+    const years = [2026, 2027, 2028, 2029, 2030];
+    
+    return years.map(yr => {
+      let total = 0;
+      let received = 0;
+      let pending = 0;
+      const breakdown: Record<string, number> = {};
+
+      stocks.forEach(stock => {
+        if (!stock.dividendInfo || stock.shares <= 0) return;
+        const info = stock.dividendInfo;
+        const symbol = stock.symbol;
+        let stockTotalForYear = 0;
+
+        if (yr === currentYear && stock.manualDividendAdjustment !== undefined && stock.manualDividendAdjustment !== null) {
+          const amount = stock.manualDividendAdjustment;
+          total += amount;
+          received += amount;
+          stockTotalForYear = amount;
+        } else {
+          const hasMonthlyDistribution = yr === currentYear && 
+            ((info.monthlyDistribution && info.monthlyDistribution.some(v => v > 0)) || 
+             (info.pendingMonthlyDistribution && info.pendingMonthlyDistribution.some(v => v > 0)));
+
+          if (hasMonthlyDistribution) {
+            let rAmount = 0;
+            let pAmount = 0;
+
+            if (info.monthlyDistribution && Array.isArray(info.monthlyDistribution)) {
+              info.monthlyDistribution.forEach(monthlyAmount => {
+                if (monthlyAmount > 0) {
+                  rAmount += monthlyAmount * stock.shares;
+                }
+              });
+            }
+
+            if (info.pendingMonthlyDistribution && Array.isArray(info.pendingMonthlyDistribution)) {
+              info.pendingMonthlyDistribution.forEach(monthlyAmount => {
+                if (monthlyAmount > 0) {
+                  pAmount += monthlyAmount * stock.shares;
+                }
+              });
+            }
+
+            received += rAmount;
+            pending += pAmount;
+            total += (rAmount + pAmount);
+            stockTotalForYear = rAmount + pAmount;
+          } else {
+            const hasHistory = info.history && Array.isArray(info.history) && info.history.length > 0;
+            const historyItems = hasHistory
+              ? info.history!
+              : [{
+                  date: info.exDividendDate || '',
+                  amount: info.amount || 0,
+                  paymentDate: info.paymentDate || ''
+                }];
+
+            historyItems.forEach(div => {
+              if (!div.date) return;
+              
+              let payDateStr = div.paymentDate || "";
+              let pYear = 0;
+              let formattedPayDateStr = "";
+              
+              const parts = payDateStr.split('-');
+              if (parts.length === 3) {
+                pYear = parseInt(parts[0]);
+                formattedPayDateStr = payDateStr;
+              } else {
+                const exParts = div.date.split('-');
+                if (exParts.length === 3) {
+                  let yearVal = parseInt(exParts[0]);
+                  let monthVal = parseInt(exParts[1]);
+                  monthVal += 1;
+                  if (monthVal > 12) {
+                    monthVal = 1;
+                    yearVal += 1;
+                  }
+                  pYear = yearVal;
+                  formattedPayDateStr = `${yearVal}-${String(monthVal).padStart(2, '0')}-${exParts[2]}`;
+                }
+              }
+              
+              if (pYear === yr) {
+                const val = div.amount * stock.shares;
+                if (val > 0) {
+                  let isPending = false;
+                  if (yr < currentYear) {
+                    isPending = false;
+                  } else if (yr > currentYear) {
+                    isPending = true;
+                  } else {
+                    isPending = formattedPayDateStr > todayStr;
+                  }
+                  
+                  if (isPending) {
+                    pending += val;
+                  } else {
+                    received += val;
+                  }
+                  total += val;
+                  stockTotalForYear += val;
+                }
+              }
+            });
+          }
+        }
+
+        if (stockTotalForYear > 0) {
+          breakdown[symbol] = stockTotalForYear;
+        }
+      });
+
+      return {
+        year: yr,
+        total: Math.round(total),
+        received: Math.round(received),
+        pending: Math.round(pending),
+        breakdown
+      };
+    }).filter(s => s.total > 0 || s.year === currentYear);
+  }, [stocks]);
+
   const [componentLimit, setComponentLimit] = useState<number>(10);
   const portfolioData = useMemo(() => {
     let totalValue = 0;
@@ -1281,7 +1409,11 @@ function MainApp() {
 
   const COLORS = ['#6366f1', '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#f43f5e', '#fb7185', '#fda4af', '#fecdd3', '#ffe4e6'];
 
-  const [activeTab, setActiveTab] = useState<'calendar' | 'list'>('calendar');
+  const [activeTab, setActiveTab] = useState<'calendar' | 'list' | 'history'>('calendar');
+  const [historySelectedYear, setHistorySelectedYear] = useState<number>(() => {
+    const cy = new Date().getFullYear();
+    return cy >= 2026 && cy <= 2030 ? cy : 2026;
+  });
   const [apiUsage, setApiUsage] = useState<{ count: number, date: string }>({ count: 0, date: new Date().toDateString() });
 
   // Load API usage from localStorage
@@ -1340,22 +1472,10 @@ function MainApp() {
           <div className="max-w-4xl mx-auto px-4 py-3">
             <div className="flex justify-between items-center mb-3">
               <div className="flex items-center gap-2">
-                <h1 className="text-lg font-black tracking-tight text-indigo-500 flex items-center gap-2">
+                <h1 className="text-lg font-black tracking-tight text-indigo-500 flex items-center gap-2 select-none">
                   <TrendingUp className="w-5 h-5" />
                   息引力
                 </h1>
-                <select
-                  value={selectedYear}
-                  onChange={(e) => setSelectedYear(Number(e.target.value))}
-                  className={cn(
-                    "text-[10px] font-black px-2 py-0.5 rounded-lg border focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-sm select-none",
-                    darkMode ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700"
-                  )}
-                >
-                  {[2026, 2027, 2028, 2029, 2030].map(yr => (
-                    <option key={yr} value={yr}>{yr} 年度</option>
-                  ))}
-                </select>
               </div>
               <div className="flex gap-2 items-center relative">
                 <button 
@@ -1830,21 +1950,42 @@ function MainApp() {
           "p-4 rounded-2xl shadow-sm border transition-colors flex flex-col",
           darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
         )}>
-          <button 
-            onClick={() => setIsOverviewExpanded(!isOverviewExpanded)}
-            className="flex justify-between items-center mb-2 shrink-0 group"
-          >
-            <div className="flex flex-col text-left">
-              <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>{selectedYear} 股息概況</h2>
+          <div className="flex justify-between items-center mb-2 shrink-0 gap-2">
+            <button 
+              onClick={() => setIsOverviewExpanded(!isOverviewExpanded)}
+              className="flex-1 flex flex-col text-left group"
+            >
+              <div className="flex items-center gap-2">
+                <h2 className={cn("text-sm font-black flex items-center gap-1.5", darkMode ? "text-slate-100" : "text-slate-900")}>
+                  <span>{selectedYear} 股息概況</span>
+                </h2>
+                <div className={cn(
+                  "p-0.5 rounded-md transition-colors",
+                  darkMode ? "text-slate-400 group-hover:bg-slate-700" : "text-slate-400 group-hover:bg-slate-150"
+                )}>
+                  {isOverviewExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </div>
+              </div>
               <p className="text-[10px] text-slate-500 font-bold">點擊{isOverviewExpanded ? '收合' : '展開'}詳細分析</p>
+            </button>
+            
+            {/* Localized Year Selector */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span className={cn("text-[10px] font-bold opacity-60", darkMode ? "text-slate-400" : "text-slate-500")}>分析年度:</span>
+              <select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(Number(e.target.value))}
+                className={cn(
+                  "text-[10px] font-black px-2 py-1 rounded-lg border focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-sm select-none",
+                  darkMode ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700"
+                )}
+              >
+                {[2026, 2027, 2028, 2029, 2030].map(yr => (
+                  <option key={yr} value={yr}>{yr} 年</option>
+                ))}
+              </select>
             </div>
-            <div className={cn(
-              "p-1.5 rounded-lg transition-colors",
-              darkMode ? "bg-slate-700 text-slate-300 group-hover:bg-slate-600" : "bg-slate-100 text-slate-500 group-hover:bg-slate-200"
-            )}>
-              {isOverviewExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </div>
-          </button>
+          </div>
           
           <AnimatePresence>
             {isOverviewExpanded && (
@@ -2022,7 +2163,7 @@ function MainApp() {
           <button
             onClick={() => setActiveTab('calendar')}
             className={cn(
-              "flex-1 py-2 text-xs font-bold rounded-lg transition-all",
+              "flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer",
               activeTab === 'calendar' 
                 ? (darkMode ? "bg-slate-800 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm")
                 : (darkMode ? "text-slate-500" : "text-slate-500")
@@ -2033,13 +2174,24 @@ function MainApp() {
           <button
             onClick={() => setActiveTab('list')}
             className={cn(
-              "flex-1 py-2 text-xs font-bold rounded-lg transition-all",
+              "flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer",
               activeTab === 'list' 
                 ? (darkMode ? "bg-slate-800 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm")
                 : (darkMode ? "text-slate-500" : "text-slate-500")
             )}
           >
             我的清單 ({stocks.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('history')}
+            className={cn(
+              "flex-1 py-2 text-xs font-bold rounded-lg transition-all cursor-pointer",
+              activeTab === 'history' 
+                ? (darkMode ? "bg-slate-800 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm")
+                : (darkMode ? "text-slate-500" : "text-slate-500")
+            )}
+          >
+            歷年股息
           </button>
         </div>
 
@@ -2166,13 +2318,241 @@ function MainApp() {
                   ))}
               </div>
             </motion.div>
+          ) : activeTab === 'history' ? (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="space-y-4"
+            >
+              {/* Yearly Summary Cards */}
+              <div className={cn(
+                "p-4 rounded-2xl shadow-sm border transition-colors",
+                darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+              )}>
+                <h3 className={cn("text-xs font-black mb-3 flex items-center gap-1.5", darkMode ? "text-slate-200" : "text-slate-800")}>
+                  <TrendingUp className="w-4 h-4 text-indigo-500" />
+                  <span>歷年股息走勢</span>
+                </h3>
+                
+                {yearlyHistoryData.length > 0 ? (
+                  <div className="space-y-4">
+                    {/* Yearly History Chart */}
+                    <div className="h-48 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={yearlyHistoryData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                          <XAxis 
+                            dataKey="year" 
+                            axisLine={false} 
+                            tickLine={false}
+                            tick={{ fontSize: 10, fill: darkMode ? '#94a3b8' : '#64748b', fontWeight: 'bold' }}
+                          />
+                          <YAxis 
+                            axisLine={false} 
+                            tickLine={false}
+                            tick={{ fontSize: 9, fill: darkMode ? '#94a3b8' : '#64748b' }}
+                            width={35}
+                            tickFormatter={(value) => value >= 1000 ? `${(value/1000).toFixed(0)}k` : value}
+                          />
+                          <RechartsTooltip 
+                            cursor={{ fill: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.02)' }}
+                            contentStyle={{ 
+                              borderRadius: '12px', 
+                              border: 'none', 
+                              boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', 
+                              fontSize: '10px',
+                              backgroundColor: darkMode ? '#1e293b' : '#ffffff',
+                              color: darkMode ? '#f1f5f9' : '#1e293b'
+                            }}
+                            formatter={(value: number, name: string) => [
+                              `$${value.toLocaleString()}`, 
+                              name === 'total' ? '總股息' : name === 'received' ? '已領股息' : '未領股息'
+                            ]}
+                          />
+                          <Bar dataKey="received" name="已領股息" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]} />
+                          <Bar dataKey="pending" name="待領股息" stackId="a" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    {/* YoY growth card */}
+                    {yearlyHistoryData.length >= 2 && (
+                      <div className={cn(
+                        "p-3 rounded-xl border flex items-center justify-between text-xs font-bold",
+                        darkMode ? "bg-slate-800/50 border-slate-700/50" : "bg-slate-50 border-slate-100"
+                      )}>
+                        <span className="opacity-75">股息成長率 (YoY)</span>
+                        {(() => {
+                          const currentYrItem = yearlyHistoryData.find(item => item.year === new Date().getFullYear());
+                          const prevYrItem = yearlyHistoryData.find(item => item.year === new Date().getFullYear() - 1);
+                          if (currentYrItem && prevYrItem && prevYrItem.total > 0) {
+                            const growth = ((currentYrItem.total - prevYrItem.total) / prevYrItem.total) * 100;
+                            return (
+                              <span className={cn(
+                                "flex items-center gap-1",
+                                growth >= 0 ? "text-emerald-500" : "text-red-500"
+                              )}>
+                                {growth >= 0 ? '▲' : '▼'} {Math.abs(growth).toFixed(1)}%
+                                <span className="text-[10px] opacity-50 font-normal">({prevYrItem.year} ➔ {currentYrItem.year})</span>
+                              </span>
+                            );
+                          }
+                          return <span className="opacity-50">計算中...</span>;
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="py-8 text-center text-slate-400 text-xs">
+                    尚無足夠的歷年配息數據。
+                  </div>
+                )}
+              </div>
+
+              {/* Historical Breakdown Table */}
+              <div className={cn(
+                "p-4 rounded-2xl shadow-sm border transition-colors",
+                darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+              )}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+                  <h3 className={cn("text-xs font-black flex items-center gap-1.5", darkMode ? "text-slate-200" : "text-slate-800")}>
+                    <PieChart className="w-4 h-4 text-indigo-500" />
+                    <span>股票年度配息明細</span>
+                  </h3>
+                  
+                  {/* Elegant Year Selector Pills */}
+                  <div className="flex gap-1 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
+                    {[2026, 2027, 2028, 2029, 2030].map(yr => (
+                      <button
+                        key={yr}
+                        onClick={() => setHistorySelectedYear(yr)}
+                        className={cn(
+                          "px-2.5 py-1 text-[10px] font-black rounded-lg transition-all cursor-pointer select-none whitespace-nowrap",
+                          historySelectedYear === yr
+                            ? "bg-indigo-500 text-white shadow-sm"
+                            : (darkMode ? "bg-slate-800 text-slate-400 hover:bg-slate-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200")
+                        )}
+                      >
+                        {yr} 年
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {stocks.length === 0 ? (
+                  <div className="py-8 text-center text-slate-400 text-xs">
+                    庫存中無股票，請先新增股票。
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {/* Selected Year Mini Summary Header */}
+                    {(() => {
+                      const yrData = yearlyHistoryData.find(item => item.year === historySelectedYear) || { total: 0, received: 0, pending: 0 };
+                      return (
+                        <div className={cn(
+                          "grid grid-cols-3 gap-2 p-2.5 rounded-xl text-center text-[10px] font-bold border",
+                          darkMode ? "bg-slate-800/40 border-slate-800/80" : "bg-slate-50 border-slate-100"
+                        )}>
+                          <div>
+                            <p className="text-slate-400">已領股息</p>
+                            <p className="text-emerald-500 font-extrabold text-xs mt-0.5">${yrData.received.toLocaleString()}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-400">待領股息</p>
+                            <p className="text-amber-500 font-extrabold text-xs mt-0.5">${yrData.pending.toLocaleString()}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-400">{historySelectedYear} 總計</p>
+                            <p className="text-indigo-500 font-extrabold text-xs mt-0.5">${yrData.total.toLocaleString()}</p>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Clean List of stock breakdown */}
+                    <div className="overflow-x-auto custom-scrollbar">
+                      <table className="w-full text-left border-collapse text-[11px]">
+                        <thead>
+                          <tr className={cn(
+                            "border-b font-extrabold uppercase tracking-wider",
+                            darkMode ? "border-slate-800 text-slate-400" : "border-slate-100 text-slate-500"
+                          )}>
+                            <th className="py-2.5 px-2">股票</th>
+                            <th className="py-2.5 px-2 text-right">持有股數</th>
+                            <th className="py-2.5 px-2 text-right">預估每股股利</th>
+                            <th className="py-2.5 px-2 text-right">預計股息</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const yrData = yearlyHistoryData.find(item => item.year === historySelectedYear);
+                            const breakdown = yrData ? yrData.breakdown : {};
+                            
+                            // Get stocks and sort by their dividends in active year
+                            const sortedStocks = [...stocks]
+                              .filter(stock => stock.shares > 0)
+                              .map(stock => {
+                                const amount = breakdown[stock.symbol] || 0;
+                                return { stock, amount };
+                              })
+                              .sort((a, b) => b.amount - a.amount);
+
+                            const activePayouts = sortedStocks.filter(({ amount }) => amount > 0);
+
+                            if (activePayouts.length === 0) {
+                              return (
+                                <tr>
+                                  <td colSpan={4} className="py-8 text-center text-slate-400 text-xs">
+                                    該年度無預估配息數據
+                                  </td>
+                                </tr>
+                              );
+                            }
+
+                            return activePayouts.map(({ stock, amount }) => {
+                              // Estimate DPS for this year
+                              let dps = 0;
+                              if (stock.manualDividendAdjustment !== undefined && stock.manualDividendAdjustment !== null) {
+                                dps = stock.manualDividendAdjustment / stock.shares;
+                              } else if (stock.dividendInfo) {
+                                dps = stock.dividendInfo.amount || 0;
+                              }
+
+                              return (
+                                <tr key={stock.symbol} className={cn(
+                                  "border-b last:border-0 font-bold transition-colors",
+                                  darkMode ? "border-slate-800/40 hover:bg-slate-800/10 text-slate-300" : "border-slate-50 hover:bg-slate-50/50 text-slate-700"
+                                )}>
+                                  <td className="py-2 px-2 min-w-[100px]">
+                                    <div className="truncate font-black">{stock.name}</div>
+                                    <div className="text-[9px] text-slate-400 font-medium">{stock.symbol}</div>
+                                  </td>
+                                  <td className="py-2 px-2 text-right font-mono text-slate-400">
+                                    {stock.shares.toLocaleString()}
+                                  </td>
+                                  <td className="py-2 px-2 text-right font-mono text-slate-400">
+                                    ${dps > 0 ? dps.toFixed(2) : '-'}
+                                  </td>
+                                  <td className="py-2 px-2 text-right font-mono text-indigo-500 font-extrabold">
+                                    ${Math.round(amount).toLocaleString()}
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
           ) : (
             <motion.div 
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               className="space-y-3"
             >
-              <div className="grid grid-cols-1 gap-3">
+              <div className="grid grid-cols-1">
                 {stocks.length === 0 ? (
                   <div className={cn(
                     "text-center py-12 rounded-2xl border border-dashed transition-colors",
@@ -2187,15 +2567,16 @@ function MainApp() {
                     <p className="text-sm text-slate-400 font-medium">尚未加入任何股票</p>
                   </div>
                 ) : (
-                  stocks.map((stock) => (
-                  <motion.div 
-                    key={stock.symbol}
-                    layout
-                    className={cn(
-                      "p-3 rounded-2xl shadow-sm border group relative transition-colors",
-                      darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
-                    )}
-                  >
+                  <div className="max-h-[560px] overflow-y-auto pr-1.5 space-y-3 custom-scrollbar">
+                    {stocks.map((stock) => (
+                      <motion.div 
+                        key={stock.symbol}
+                        layout
+                        className={cn(
+                          "p-3 rounded-2xl shadow-sm border group relative transition-colors",
+                          darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+                        )}
+                      >
                     <div className="flex justify-between items-start gap-2">
                       <div className="flex-1 min-w-0">
                         <h3 className={cn(
@@ -2514,9 +2895,10 @@ function MainApp() {
                         </div>
                       </div>
                     )}
-                  </motion.div>
-                ))
-              )}
+                      </motion.div>
+                    ))}
+                  </div>
+                )}
               </div>
             </motion.div>
           )}
