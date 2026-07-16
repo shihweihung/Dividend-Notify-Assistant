@@ -30,6 +30,7 @@ async function startServer() {
   }
 
   async function sendTelegramMsg(botToken: string, toChatId: number, textToSend: string) {
+    console.log(`[Telegram Send] Attempting to send to ChatID ${toChatId}, message length: ${textToSend.length}`);
     try {
       const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: "POST",
@@ -40,9 +41,12 @@ async function startServer() {
           parse_mode: "Markdown",
         }),
       });
+      if (response && response.ok) {
+        console.log(`[Telegram Send Success] Delivered to ChatID ${toChatId}`);
+      }
       return response;
-    } catch (err) {
-      console.error("Telegram error:", err);
+    } catch (err: any) {
+      console.error(`[Telegram Send Fatal] ChatID ${toChatId}:`, err instanceof Error ? err.stack : err);
     }
   }
 
@@ -318,6 +322,7 @@ async function startServer() {
         `  - 短線：明確的進場觀察點或支撐/壓力位。\n` +
         `- **關鍵風險提示**：1 個最需緊盯的警訊或明確的停損觸發點。`;
 
+      console.log(`[Process] About to call Gemini for ChatID ${chatId}`);
       let response;
       const modelsToTry = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
       let lastErr: any = null;
@@ -326,7 +331,8 @@ async function startServer() {
         let retries = 2;
         while (retries > 0) {
           try {
-            response = await ai.models.generateContent({
+            let timeoutId: NodeJS.Timeout | undefined = undefined;
+            const apiCallPromise = ai.models.generateContent({
               model: modelName,
               contents: text,
               config: {
@@ -335,6 +341,17 @@ async function startServer() {
                 maxOutputTokens: 800,
               },
             });
+
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timeoutId = setTimeout(() => {
+                reject(new Error("Gemini API call timed out after 25 seconds"));
+              }, 25000);
+            });
+
+            response = await Promise.race([apiCallPromise, timeoutPromise]);
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+            }
             break;
           } catch (err: any) {
             retries--;
@@ -356,7 +373,9 @@ async function startServer() {
       }
 
       const replyText = response.text || "抱歉，我的思考核心目前忙碌中，請稍候再試。";
+      console.log(`[Process] Gemini done, reply length: ${replyText.length}, about to send`);
       await sendTelegramMsg(botToken, chatId, replyText);
+      console.log(`[Process] sendTelegramMsg returned for ChatID ${chatId}`);
 
     } catch (err: any) {
       console.error("Gemini Telegram answering error:", err.message || err);
@@ -376,10 +395,10 @@ async function startServer() {
 
   // API: Telegram Webhook Receiver (Bidirectional Interaction - Webhook Mode / Callback fallback)
   app.post("/api/telegram/webhook", async (req, res) => {
-    if (req.headers['x-telegram-bot-api-secret-token'] !== process.env.API_SECRET_KEY) {
-      return res.sendStatus(403);
-    }
     try {
+      if (req.headers['x-telegram-bot-api-secret-token'] !== process.env.API_SECRET_KEY) {
+        return res.sendStatus(403);
+      }
       const { message, edited_message } = req.body;
       const msg = message || edited_message;
       if (!msg || !msg.chat || !msg.chat.id) {
@@ -402,10 +421,11 @@ async function startServer() {
       
       // Process the message synchronously
       await processTelegramMessage(botToken, msg);
-    } catch (err) {
-      console.error("Error inside Webhook receiver middleware:", err);
+      return res.sendStatus(200);
+    } catch (err: any) {
+      console.error("Error inside Webhook receiver middleware:", err instanceof Error ? err.stack : err);
+      return res.sendStatus(200);
     }
-    return res.sendStatus(200);
   });
 
   // API: Register Telegram Webhook (Dynamic Selection based on Host Environment)
