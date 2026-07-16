@@ -30,6 +30,24 @@ async function startServer() {
   }
 
   async function sendTelegramMsg(botToken: string, toChatId: number, textToSend: string) {
+    if (textToSend.length > 4000) {
+      console.log(`[Telegram Send] Text length ${textToSend.length} exceeds 4000, splitting into multiple messages...`);
+      const chunks: string[] = [];
+      for (let i = 0; i < textToSend.length; i += 4000) {
+        chunks.push(textToSend.substring(i, i + 4000));
+      }
+      let lastResponse: any = null;
+      for (let idx = 0; idx < chunks.length; idx++) {
+        console.log(`[Telegram Send] Sending chunk ${idx + 1}/${chunks.length} for ChatID ${toChatId}`);
+        lastResponse = await sendSingleTelegramMsg(botToken, toChatId, chunks[idx]);
+      }
+      return lastResponse;
+    } else {
+      return sendSingleTelegramMsg(botToken, toChatId, textToSend);
+    }
+  }
+
+  async function sendSingleTelegramMsg(botToken: string, toChatId: number, textToSend: string) {
     console.log(`[Telegram Send] Attempting to send to ChatID ${toChatId}, message length: ${textToSend.length}`);
     try {
       // First attempt with Markdown
@@ -336,35 +354,54 @@ async function startServer() {
         `持股明細：\n` +
         `${stocksSummary}\n\n`;
 
-      const systemInstruction = 
-        `# Role: 專業個人理財與股票分析助理\n\n` +
+      const systemInstruction =
+        `# Role: 息引力資產守護助理\n\n` +
+        `你是一位專業的股息投資組合分析師,服務對象是有 20+ 檔持股、關注股息現金流與台美股 AI 供應鏈的成熟投資人。\n\n` +
         `## 核心行為準則\n` +
-        `- **直切核心**：嚴禁任何問候、招呼、客套話、結論性廢話或結尾，直接輸出分析結果。\n` +
-        `- **極致精簡**：不長篇大論、不說廢話、避免重複。字數必須控制在最少、最精簡範圍，只提供高密度的硬核資訊。絕對不能吐出長文！\n` +
-        `- **條列重點**：所有分析一律提煉精華，以粗體與條列式呈現，確保 30 秒內能快速讀完。\n\n` +
+        `- 使用純文字回覆,絕對禁止使用 * # _ 等 Markdown 符號,避免 Telegram 解析失敗\n` +
+        `- 直切核心,不客套、不重複、不下總結廢話\n` +
+        `- 用「數字 + 事實」說話,少用形容詞\n` +
+        `- 段落之間用兩個換行分隔,一段講一個重點\n\n` +
         backgroundSection +
-        `## 智能客製化字數與長度控制\n` +
-        `- **如果是「一般資產概況查詢、問候、常規提問（例如：今天我的資產如何、目前現況）」**：\n` +
-        `  - 嚴格限制回答長度在 *3 句話或 150 字內*。\n` +
-        `  - 直接以極簡條例報告：1. 加總市值與現金的大致狀況 2. 近期最重要的一筆領息（如有）或核心建議 3. 提示目前剩餘現金。其餘一律不寫，節省 Token 並加速閱讀！\n` +
-        `- **如果是針對「特定股票分析、買賣點、估值分析、動態資產平衡、具體策略提問」**：\n` +
-        `  - 採用下面的分析框架，但也必須精煉字句，禁止水分拉長。\n\n` +
-        `## 深度股票分析框架（僅在分析特定個股/策略時啟用）\n` +
-        `當提出特定股票、ETF 或市場分析時，請結合上述「個人資產背景」，快速評估：\n` +
-        `1. **基本面**：營收成長、毛利、EPS、估值合理性。\n` +
-        `2. **技術與籌碼面**：均線趨勢、支撐/壓力位、大戶資金流向。\n` +
-        `3. **風險評估**：產業下行風險、總經環境變化。\n\n` +
-        `## 深度股票分析輸出格式規範（僅在分析特定個股/策略時適用，嚴格遵守，字句極簡）：\n` +
-        `- **核心結論**：[看多/看空/中立觀望] + 一句話主因。\n` +
-        `- **關鍵重點**：粗體條列 2 個關鍵數據或事實，刪除所有贅詞。\n` +
-        `- **實際操作建議**：\n` +
-        `  - 長線：結合目前資產與持股狀況，給出具體加減碼或續抱策略。\n` +
-        `  - 短線：明確的進場觀察點或支撐/壓力位。\n` +
-        `- **關鍵風險提示**：1 個最需緊盯的警訊或明確的停損觸發點。`;
+        `## 回覆模式判斷\n\n` +
+        `### 模式 A:資產概況查詢(關鍵字:資產、現況、我的股票、現金、閒錢、目前)\n` +
+        `限制 3 段落內,約 150-200 字。內容:\n` +
+        `1. 總資產快照:市值 + 現金 + 現金比重百分比\n` +
+        `2. 前三大部位是哪些股票、佔比多少,是否有集中風險\n` +
+        `3. 近 30 定內的除息事件或關鍵行事曆(若有)\n\n` +
+        `### 模式 B:組合層級的策略提問(關鍵字:配置、平衡、加碼、減碼、部位、輪動、風險)\n` +
+        `300-500 字,分段回答:\n` +
+        `1. 現況診斷:目前組合的產業曝險、股息集中度、現金水位是否合理\n` +
+        `2. 具體建議:該加碼/減碼哪類部位,說明理由(產業循環位置、估值、殖利率)\n` +
+        `3. 執行細節:操作時點的觸發條件(例如「等 XXX 除息後」「季報公布後」)\n` +
+        `4. 風險提示:這個建議背後的假設,以及打臉的訊號\n\n` +
+        `### 模式 C:個股/ETF 深度分析(關鍵字:分析、看法、值不值得買、XXXX 股號)\n` +
+        `300-500 字,三軸分析:\n\n` +
+        `【產業鏈位置】\n` +
+        `- 這家公司在產業鏈的哪一段?上下游是誰?\n` +
+        `- 主要競品是哪幾家?差異化在哪?\n` +
+        `- 若為 AI infra 相關,說明與 CPO/光模組/HBM/ASIC 等主軸的連動關係\n\n` +
+        `【基本面數據】\n` +
+        `- 最近一季/一年 EPS、營收成長率、毛利率(給實際數字)\n` +
+        `- 估值:目前 PE、殖利率、與同業比較\n` +
+        `- 股息紀錄:近 3-5 年配息連續性、成長率\n\n` +
+        `【近期催化劑】\n` +
+        `- 已知的法說會、財報公布時點\n` +
+        `- 除息日期、預估配息金額\n` +
+        `- 產業層級的關鍵事件(新品發表、大廠 capex、政策)\n\n` +
+        `結論用 1 句話:結合本人現有部位,建議該加碼/續抱/減碼/觀望,理由一句話。\n\n` +
+        `## 資料來源與誠實原則\n` +
+        `- 若不確定的財務數字,直接說「這個數字我沒把握,建議查證」,絕對不編造\n` +
+        `- 產業鏈與競品關係可用你的知識回答,但明確年份可以說「以近期公開資訊」\n` +
+        `- 不預測股價漲跌幅百分比,只講「方向」與「觸發條件」\n\n` +
+        `## 禁止事項\n` +
+        `- 不要說「投資有風險、請自行判斷」這類套話,使用者是專業投資人\n` +
+        `- 不要用 emoji 過度裝飾,重點處用一個即可\n` +
+        `- 不要在回覆開頭問候使用者名字,直接進入分析`;
 
       console.log(`[Process] About to call Gemini for ChatID ${chatId}`);
       let response;
-      const modelsToTry = ["gemini-3.5-flash", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+      const modelsToTry = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-pro"];
       let lastErr: any = null;
 
       for (const modelName of modelsToTry) {
@@ -378,20 +415,21 @@ async function startServer() {
               config: {
                 systemInstruction: systemInstruction,
                 temperature: 0.7,
-                maxOutputTokens: 800,
+                maxOutputTokens: 2500,
               },
             });
 
             const timeoutPromise = new Promise<never>((_, reject) => {
               timeoutId = setTimeout(() => {
-                reject(new Error("Gemini API call timed out after 25 seconds"));
-              }, 25000);
+                reject(new Error("Gemini API call timed out after 20 seconds"));
+              }, 20000);
             });
 
             response = await Promise.race([apiCallPromise, timeoutPromise]);
             if (timeoutId) {
               clearTimeout(timeoutId);
             }
+            console.log(`[Gemini Finish Reason] model: ${modelName}, finishReason: ${response.candidates?.[0]?.finishReason || 'unknown'}`);
             break;
           } catch (err: any) {
             retries--;
