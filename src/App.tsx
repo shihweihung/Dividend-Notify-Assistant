@@ -123,7 +123,7 @@ function MainApp() {
     const saved = localStorage.getItem('dividend_dark_mode');
     return saved === 'true';
   });
-  const [isOverviewExpanded, setIsOverviewExpanded] = useState(true);
+  const [isOverviewExpanded, setIsOverviewExpanded] = useState(false);
   const [selectedYear, setSelectedYear] = useState<number>(() => new Date().getFullYear());
   const [hasAutoRefreshed, setHasAutoRefreshed] = useState(false);
   const [cash, setCash] = useState<number>(0);
@@ -886,28 +886,86 @@ function MainApp() {
     
     stocks.forEach(stock => {
       if (stock.dividendInfo) {
-        const exDate = stock.dividendInfo.exDividendDate ? parseISO(stock.dividendInfo.exDividendDate) : null;
-        const payDate = stock.dividendInfo.paymentDate ? parseISO(stock.dividendInfo.paymentDate) : null;
+        // If the full dividend history exists, populate all events of the current year from history
+        if (stock.dividendInfo.history && Array.isArray(stock.dividendInfo.history) && stock.dividendInfo.history.length > 0) {
+          const seenExDates = new Set<string>();
+          const seenPayDates = new Set<string>();
 
-        if (exDate && exDate.getFullYear() === currentYear) {
-          events.push({
-            date: exDate,
-            type: 'ex-dividend',
-            stockName: stock.name,
-            symbol: stock.symbol,
-            amount: stock.dividendInfo.amount
+          stock.dividendInfo.history.forEach(div => {
+            const exDateStr = div.date; // YYYY-MM-DD
+            let payDateStr = div.paymentDate || div.payDate; // YYYY-MM-DD
+
+            // If payment date is empty but ex-dividend date exists, estimate it as ex-dividend date + 1 month
+            if (!payDateStr && exDateStr) {
+              const parsedEx = parseISO(exDateStr);
+              if (parsedEx && !isNaN(parsedEx.getTime())) {
+                const estPay = new Date(parsedEx);
+                estPay.setMonth(estPay.getMonth() + 1);
+                const yyyy = estPay.getFullYear();
+                const mm = String(estPay.getMonth() + 1).padStart(2, '0');
+                const dd = String(estPay.getDate()).padStart(2, '0');
+                payDateStr = `${yyyy}-${mm}-${dd}`;
+              }
+            }
+
+            const exDate = exDateStr ? parseISO(exDateStr) : null;
+            const payDate = payDateStr ? parseISO(payDateStr) : null;
+
+            if (exDate && !isNaN(exDate.getTime()) && exDate.getFullYear() === currentYear) {
+              const exKey = `${stock.symbol}-${exDateStr}`;
+              if (!seenExDates.has(exKey)) {
+                seenExDates.add(exKey);
+                events.push({
+                  date: exDate,
+                  type: 'ex-dividend',
+                  stockName: stock.name,
+                  symbol: stock.symbol,
+                  amount: div.amount || stock.dividendInfo?.amount || 0
+                });
+              }
+            }
+
+            if (payDate && !isNaN(payDate.getTime()) && payDate.getFullYear() === currentYear) {
+              const payKey = `${stock.symbol}-${payDateStr}`;
+              if (!seenPayDates.has(payKey)) {
+                seenPayDates.add(payKey);
+                events.push({
+                  date: payDate,
+                  type: 'payment',
+                  stockName: stock.name,
+                  symbol: stock.symbol,
+                  amount: (stock.manualDividendAdjustment !== null && stock.manualDividendAdjustment !== undefined)
+                    ? stock.manualDividendAdjustment 
+                    : (div.amount || stock.dividendInfo?.amount || 0) * stock.shares
+                });
+              }
+            }
           });
-        }
-        if (payDate && payDate.getFullYear() === currentYear) {
-          events.push({
-            date: payDate,
-            type: 'payment',
-            stockName: stock.name,
-            symbol: stock.symbol,
-            amount: (stock.manualDividendAdjustment !== null && stock.manualDividendAdjustment !== undefined)
-              ? stock.manualDividendAdjustment 
-              : stock.dividendInfo.amount * stock.shares
-          });
+        } else {
+          // Fallback to top-level single event
+          const exDate = stock.dividendInfo.exDividendDate ? parseISO(stock.dividendInfo.exDividendDate) : null;
+          const payDate = stock.dividendInfo.paymentDate ? parseISO(stock.dividendInfo.paymentDate) : null;
+
+          if (exDate && !isNaN(exDate.getTime()) && exDate.getFullYear() === currentYear) {
+            events.push({
+              date: exDate,
+              type: 'ex-dividend',
+              stockName: stock.name,
+              symbol: stock.symbol,
+              amount: stock.dividendInfo.amount
+            });
+          }
+          if (payDate && !isNaN(payDate.getTime()) && payDate.getFullYear() === currentYear) {
+            events.push({
+              date: payDate,
+              type: 'payment',
+              stockName: stock.name,
+              symbol: stock.symbol,
+              amount: (stock.manualDividendAdjustment !== null && stock.manualDividendAdjustment !== undefined)
+                ? stock.manualDividendAdjustment 
+                : stock.dividendInfo.amount * stock.shares
+            });
+          }
         }
       }
     });
@@ -2247,7 +2305,7 @@ function MainApp() {
                       <div 
                         key={idx} 
                         className={cn(
-                          "min-h-[50px] p-1 rounded-lg border transition-colors",
+                          "min-h-[50px] p-0.5 sm:p-1 rounded-lg border transition-colors flex flex-col justify-between",
                           isCurrentMonth 
                             ? (darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-50")
                             : (darkMode ? "bg-slate-950/30 border-transparent opacity-20" : "bg-slate-50/30 border-transparent opacity-30")
@@ -2255,7 +2313,7 @@ function MainApp() {
                       >
                         <div className="flex justify-between items-start">
                           <span className={cn(
-                            "text-[10px] font-bold",
+                            "text-[9px] sm:text-[10px] font-bold",
                             isTodayDate 
                               ? "bg-indigo-600 text-white w-4 h-4 flex items-center justify-center rounded-full" 
                               : (darkMode ? "text-slate-500" : "text-slate-500")
@@ -2263,18 +2321,23 @@ function MainApp() {
                             {format(day, 'd')}
                           </span>
                         </div>
-                        <div className="mt-1 space-y-0.5">
+                        <div className="mt-1 space-y-0.5 flex-1 flex flex-col justify-end">
                           {dayEvents.map((event, eIdx) => (
                             <div 
                               key={eIdx}
                               className={cn(
-                                "text-[8px] px-1 py-0.5 rounded-sm truncate font-bold border-l-2",
+                                "text-[7.5px] xs:text-[8px] sm:text-[9px] px-0.5 sm:px-1 py-0.5 rounded-sm truncate font-bold border-l-2 leading-none",
                                 event.type === 'ex-dividend' 
                                   ? (darkMode ? "bg-orange-950/40 text-orange-400 border-orange-500" : "bg-orange-100 text-orange-700 border-orange-500")
                                   : (darkMode ? "bg-emerald-950/40 text-emerald-400 border-emerald-500" : "bg-emerald-100 text-emerald-700 border-emerald-500")
                               )}
                             >
-                              {event.type === 'ex-dividend' ? '除' : '領'}{event.stockName}
+                              <span className="md:hidden">
+                                {event.type === 'ex-dividend' ? '除' : '領'}{event.symbol}
+                              </span>
+                              <span className="hidden md:inline">
+                                {event.type === 'ex-dividend' ? '除' : '領'}{event.stockName}
+                              </span>
                             </div>
                           ))}
                         </div>

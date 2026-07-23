@@ -6,6 +6,8 @@ import path from "path";
 import fs from "fs";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
+import { fetchStockDataFromTwse } from "./src/services/twseService";
+import moment from "moment-timezone";
 
 const __dirname = process.cwd();
 
@@ -13,20 +15,54 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // 1. Module/Function level variables for Firestore connection health
+  let firestoreAvailable: boolean | null = null;
+  let firestoreErrorLogged = false;
+  const isProduction = process.env.NODE_ENV === "production" || !!process.env.K_SERVICE;
+
+  // In-memory fallback caches
+  const inMemoryProcessedMessages = new Set<string>();
+  const inMemoryRateLimits = new Map<string, number[]>();
+  const inMemoryTelegramChats = new Map<string, any>();
+
+  function logFirestoreError(context: string, error: any) {
+    if (isProduction) {
+      console.error(`[Firestore Error] ${context}:`, error);
+    } else {
+      if (!firestoreErrorLogged) {
+        console.warn(`[Firestore Warning] ${context} (this is expected in dev environments without Firestore access):`, error.message || error);
+        firestoreErrorLogged = true;
+      }
+    }
+  }
+
   // Initialize Firebase Admin dynamically securely connected to Firestore
   const fbConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
   let adminDb: any = null;
   if (fs.existsSync(fbConfigPath)) {
     try {
       const firebaseConfig = JSON.parse(fs.readFileSync(fbConfigPath, "utf-8"));
-      const app = admin.initializeApp({
+      const firebaseApp = admin.initializeApp({
         projectId: firebaseConfig.projectId,
       });
-      adminDb = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+      adminDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
       console.log(`[Firebase Admin] Fully initialized with Project ID: ${firebaseConfig.projectId}, Database ID: ${firebaseConfig.firestoreDatabaseId}`);
+
+      // 2. Perform connection check at startup
+      try {
+        await adminDb.collection("telegram_chats").limit(1).get();
+        firestoreAvailable = true;
+        console.log("[Firestore] Health check passed");
+      } catch (hcErr: any) {
+        firestoreAvailable = false;
+        console.warn("[Firestore] Not accessible in this environment. Some features will be disabled.", hcErr.message || hcErr);
+      }
     } catch (fbErr) {
       console.error("[Firebase Admin] Initialization failed:", fbErr);
+      firestoreAvailable = false;
     }
+  } else {
+    firestoreAvailable = false;
   }
 
   async function sendTelegramMsg(botToken: string, toChatId: number, textToSend: string) {
@@ -109,15 +145,31 @@ async function startServer() {
   }
 
   const getChatFromFirestore = async (chatId: string) => {
-    const doc = await adminDb.collection("telegram_chats").doc(chatId).get();
-    return doc.exists ? doc.data() : null;
+    if (firestoreAvailable === false) {
+      return inMemoryTelegramChats.get(chatId) || null;
+    }
+    try {
+      const doc = await adminDb.collection("telegram_chats").doc(chatId).get();
+      return doc.exists ? doc.data() : null;
+    } catch (e: any) {
+      logFirestoreError(`getChatFromFirestore for chatId ${chatId}`, e);
+      return inMemoryTelegramChats.get(chatId) || null;
+    }
   };
 
   const saveChatToFirestore = async (chatId: string, data: any) => {
-    await adminDb.collection("telegram_chats").doc(chatId).set({
-      ...data,
-      updatedAt: new Date().toISOString()
-    }, { merge: true });
+    inMemoryTelegramChats.set(chatId, data);
+    if (firestoreAvailable === false) {
+      return;
+    }
+    try {
+      await adminDb.collection("telegram_chats").doc(chatId).set({
+        ...data,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+    } catch (e: any) {
+      logFirestoreError(`saveChatToFirestore for chatId ${chatId}`, e);
+    }
   };
 
   // Migrate JSON DB to Firestore
@@ -126,10 +178,17 @@ async function startServer() {
     try {
       const dbData = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
       for (const chatId in dbData) {
-        await adminDb.collection("telegram_chats").doc(chatId).set(dbData[chatId]);
+        if (firestoreAvailable !== false) {
+          try {
+            await adminDb.collection("telegram_chats").doc(chatId).set(dbData[chatId]);
+          } catch (e: any) {
+            logFirestoreError(`Migrate JSON DB element for ${chatId}`, e);
+          }
+        }
+        inMemoryTelegramChats.set(chatId, dbData[chatId]);
       }
       fs.unlinkSync(dbPath);
-      console.log("Migration complete: telegram_chats_db.json -> Firestore");
+      console.log("Migration complete: telegram_chats_db.json -> Firestore/InMemory fallback");
     } catch (e) {
       console.error("Migration error:", e);
     }
@@ -145,6 +204,134 @@ async function startServer() {
       res.status(401).json({ error: 'Unauthorized: Invalid or missing API key' });
     }
   };
+
+  async function updateAllUserStocks() {
+    if (!adminDb || firestoreAvailable === false) {
+      console.warn("[Stock Update] Firestore not accessible or initialized in this environment. Skipping global stock update.");
+      return;
+    }
+
+    console.log("[Stock Update] Starting global stock data update...");
+    const fetchCache = new Map<string, any>();
+
+    try {
+      // 1. Get all users
+      const usersSnap = await adminDb.collection("users").get();
+      console.log(`[Stock Update] Found ${usersSnap.size} users to update.`);
+
+      for (const userDoc of usersSnap.docs) {
+        const userId = userDoc.id;
+        const stocksSnap = await adminDb.collection("users").doc(userId).collection("stocks").get();
+        console.log(`[Stock Update] User ${userId} has ${stocksSnap.size} stocks.`);
+
+        for (const stockDoc of stocksSnap.docs) {
+          const stock = stockDoc.data();
+          const symbol = stockDoc.id; // Stock symbol is the document ID
+
+          if (!symbol) continue;
+
+          console.log(`[Stock Update] Updating stock ${symbol} for user ${userId}`);
+
+          let data = fetchCache.get(symbol);
+          if (data === undefined) {
+            try {
+              console.log(`[Stock Update] Fetching fresh data for ${symbol} from TWSE/Yahoo/HiStock...`);
+              data = await fetchStockDataFromTwse(symbol);
+              fetchCache.set(symbol, data);
+              // Wait a bit to avoid hitting endpoints too rapidly
+              await new Promise(resolve => setTimeout(resolve, 1500));
+            } catch (err: any) {
+              console.error(`[Stock Update] Error fetching data for ${symbol}:`, err.message || err);
+              data = null;
+              fetchCache.set(symbol, null);
+            }
+          } else {
+            console.log(`[Stock Update] Using cached data for ${symbol}`);
+          }
+
+          if (data) {
+            try {
+              const dividendInfo = {
+                symbol: data.symbol,
+                name: data.name,
+                exDividendDate: data.exDate,
+                paymentDate: data.paymentDate,
+                amount: data.amount,
+                receivedAmountCurrentYear: data.receivedAmount,
+                pendingAmountCurrentYear: data.pendingAmount,
+                monthlyDistribution: data.monthlyDistribution,
+                pendingMonthlyDistribution: data.pendingMonthlyDistribution,
+                currentPrice: data.price,
+                yield: data.yield,
+                isPaymentDateEstimated: data.isPaymentDateEstimated,
+                status: data.status,
+                history: data.history,
+                updatedAt: new Date().toISOString()
+              };
+
+              await adminDb.collection("users").doc(userId).collection("stocks").doc(symbol).set({
+                dividendInfo,
+                updatedAt: new Date().toISOString()
+              }, { merge: true });
+
+              console.log(`[Stock Update Success] Updated ${symbol} for user ${userId}`);
+            } catch (updateErr: any) {
+              console.error(`[Stock Update Error] Failed to write ${symbol} to Firestore for user ${userId}:`, updateErr.message || updateErr);
+            }
+          }
+        }
+      }
+      console.log("[Stock Update] Global stock data update completed successfully!");
+    } catch (err: any) {
+      console.error("[Stock Update Fatal] Global stock update failed:", err.message || err);
+    }
+  }
+
+  let lastUpdateRunDate = "";
+
+  function startDailyUpdateScheduler() {
+    console.log("[Scheduler] Daily stock update scheduler started.");
+    
+    setInterval(async () => {
+      try {
+        const taipeiTime = moment().tz("Asia/Taipei");
+        const todayStr = taipeiTime.format("YYYY-MM-DD");
+        const hourMinute = taipeiTime.format("HH:mm");
+        const dayOfWeek = taipeiTime.day(); // 0 is Sunday, 6 is Saturday
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+        // Check if it's 2:00 PM (14:00) Taipei time and hasn't run today yet
+        if (hourMinute === "14:00" && lastUpdateRunDate !== todayStr) {
+          lastUpdateRunDate = todayStr;
+          if (isWeekend) {
+            console.log(`[Scheduler] It is 14:00 Taipei time on weekend (${todayStr}). Skipping stock update as market is closed.`);
+          } else {
+            console.log(`[Scheduler] It is 14:00 Taipei time on weekday (${todayStr}). Triggering daily stock update...`);
+            await updateAllUserStocks();
+          }
+        }
+      } catch (err: any) {
+        console.error("[Scheduler Error] Error in daily update check:", err.message || err);
+      }
+    }, 60000); // Check every minute
+  }
+
+  // Start the daily update scheduler
+  startDailyUpdateScheduler();
+
+  // API: Manually trigger update of all user stock prices & dividends
+  app.get("/api/admin/trigger-stock-update", async (req, res) => {
+    const key = req.query.key || req.headers['x-api-key'];
+    if (!process.env.API_SECRET_KEY || key === process.env.API_SECRET_KEY) {
+      console.log("[API] Manual stock update triggered via API.");
+      updateAllUserStocks().catch(err => {
+        console.error("[API Stock Update Error]", err);
+      });
+      return res.json({ success: true, message: "Stock update process triggered in background." });
+    } else {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+  });
 
   // API: Save / Sync Telegram Chat Data
   app.post("/api/telegram/save-chat-data", apiKeyAuth, async (req, res) => {
@@ -215,26 +402,75 @@ async function startServer() {
     const chatId = msg.chat.id;
     const msgId = msg.message_id;
 
-    // 1. Deduplication & Rate Limiting
+    // 1. Deduplication & Rate Limiting with Fallbacks
     const now = Date.now();
-    const dedupDocRef = adminDb.collection("processed_messages").doc(`${chatId}_${msgId}`);
-    const dedupDoc = await dedupDocRef.get();
-    if (dedupDoc.exists && now - dedupDoc.data()!.timestamp < 600000) {
+    const dedupKey = `${chatId}_${msgId}`;
+    let isDuplicate = false;
+
+    if (firestoreAvailable !== false) {
+      try {
+        const dedupDocRef = adminDb.collection("processed_messages").doc(dedupKey);
+        const dedupDoc = await dedupDocRef.get();
+        if (dedupDoc.exists && now - dedupDoc.data()!.timestamp < 600000) {
+          isDuplicate = true;
+        } else {
+          await dedupDocRef.set({ timestamp: now });
+        }
+      } catch (e: any) {
+        logFirestoreError("Deduplication check", e);
+        if (inMemoryProcessedMessages.has(dedupKey)) {
+          isDuplicate = true;
+        } else {
+          inMemoryProcessedMessages.add(dedupKey);
+        }
+      }
+    } else {
+      if (inMemoryProcessedMessages.has(dedupKey)) {
+        isDuplicate = true;
+      } else {
+        inMemoryProcessedMessages.add(dedupKey);
+      }
+    }
+
+    if (isDuplicate) {
       console.log(`[Telegram Bot Dedup] Already processed message ${msgId} for ChatID ${chatId}. Discarding duplicate.`);
       return;
     }
-    await dedupDocRef.set({ timestamp: now });
 
-    const rateLimitRef = adminDb.collection("rate_limits").doc(String(chatId));
-    const rateLimitDoc = await rateLimitRef.get();
-    let timestamps = rateLimitDoc.exists ? (rateLimitDoc.data()!.timestamps || []) : [];
-    timestamps = timestamps.filter((ts: number) => now - ts < 60000);
-    if (timestamps.length >= 3) {
-      await sendTelegramMsg(botToken, chatId, "請稍後再試");
-      return;
+    let timestamps: number[] = [];
+    if (firestoreAvailable !== false) {
+      try {
+        const rateLimitRef = adminDb.collection("rate_limits").doc(String(chatId));
+        const rateLimitDoc = await rateLimitRef.get();
+        timestamps = rateLimitDoc.exists ? (rateLimitDoc.data()!.timestamps || []) : [];
+        timestamps = timestamps.filter((ts: number) => now - ts < 60000);
+        if (timestamps.length >= 3) {
+          await sendTelegramMsg(botToken, chatId, "請稍後再試");
+          return;
+        }
+        timestamps.push(now);
+        await rateLimitRef.set({ timestamps });
+      } catch (e: any) {
+        logFirestoreError("Rate limit check", e);
+        timestamps = inMemoryRateLimits.get(String(chatId)) || [];
+        timestamps = timestamps.filter((ts: number) => now - ts < 60000);
+        if (timestamps.length >= 3) {
+          await sendTelegramMsg(botToken, chatId, "請稍後再試");
+          return;
+        }
+        timestamps.push(now);
+        inMemoryRateLimits.set(String(chatId), timestamps);
+      }
+    } else {
+      timestamps = inMemoryRateLimits.get(String(chatId)) || [];
+      timestamps = timestamps.filter((ts: number) => now - ts < 60000);
+      if (timestamps.length >= 3) {
+        await sendTelegramMsg(botToken, chatId, "請稍後再試");
+        return;
+      }
+      timestamps.push(now);
+      inMemoryRateLimits.set(String(chatId), timestamps);
     }
-    timestamps.push(now);
-    await rateLimitRef.set({ timestamps });
 
     const text = (msg.text || "").trim();
     const username = msg.from?.first_name || msg.from?.username || msg.from?.last_name || "投資大師";
@@ -257,7 +493,7 @@ async function startServer() {
     }
 
     // 2. Secondary Fallback: Cloud Firestore DB
-    if (!foundInFirestore && adminDb) {
+    if (!foundInFirestore && firestoreAvailable !== false && adminDb) {
       try {
         console.log(`[Telegram Bot DB Lookup] Querying Firestore fallback for telegramChatId = "${chatId}"`);
         const usersRef = adminDb.collection("users");
@@ -277,8 +513,8 @@ async function startServer() {
         } else {
           console.log(`[Telegram Bot DB Lookup] No user document matches telegramChatId: "${chatId}" in Firestore.`);
         }
-      } catch (err) {
-        console.error("[Telegram Bot DB Lookup] Firestore look up error:", err);
+      } catch (err: any) {
+        logFirestoreError("Secondary User Lookup", err);
       }
     }
 
@@ -342,7 +578,7 @@ async function startServer() {
                 extra += `, 現價: ${divInfo.currentPrice}元`;
               }
               if (divInfo.yield) {
-                extra += `, 殖利率: ${(divInfo.yield * 100).toFixed(2)}%`;
+                extra += `, 殖利率: ${Number(divInfo.yield).toFixed(2)}%`;
               }
             }
             return `- ${name} (${s.symbol}): ${shares} 股${extra}`;
@@ -590,6 +826,10 @@ async function startServer() {
 
   async function getActivePollingBotTokens(): Promise<string[]> {
     const defaultBotToken = process.env.TELEGRAM_BOT_TOKEN;
+    if (firestoreAvailable === false) {
+      return [defaultBotToken].filter(Boolean) as string[];
+    }
+
     const tokens = new Set<string>();
     
     let defaultIsWebhook = false;
@@ -608,8 +848,15 @@ async function startServer() {
           }
         }
       });
-    } catch (e) {
-      console.error("Error retrieving dynamic bot tokens:", e);
+    } catch (e: any) {
+      if (isProduction || firestoreAvailable === true) {
+        console.error("Error retrieving dynamic bot tokens:", e);
+      } else {
+        if (!firestoreErrorLogged) {
+          console.warn("[Firestore] Cannot retrieve dynamic bot tokens (this is expected in dev environments without Firestore access):", e.message || e);
+          firestoreErrorLogged = true;
+        }
+      }
     }
 
     if (defaultBotToken && !defaultIsWebhook) {
@@ -675,6 +922,228 @@ async function startServer() {
     } catch (error) {
       console.error("Server-side Gemini error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "AI 查詢失敗" });
+    }
+  });
+
+  // API: Daily Batch for price updates and portfolio snapshots (Triggered daily at 14:00 Taipei time by Cloud Scheduler)
+  app.post("/api/cron/daily-batch", apiKeyAuth, async (req, res) => {
+    const startTime = Date.now();
+    
+    if (!adminDb || firestoreAvailable === false) {
+      return res.status(503).json({
+        success: false,
+        error: "Firestore is not available or initialized."
+      });
+    }
+
+    try {
+      // Step 1: Get all users and collect unique stock symbols
+      const usersSnap = await adminDb.collection("users").get();
+      const allStocksToUpdate: { userId: string, symbol: string, docId: string }[] = [];
+      const uniqueSymbolsSet = new Set<string>();
+
+      for (const userDoc of usersSnap.docs) {
+        const userId = userDoc.id;
+        const stocksSnap = await adminDb.collection("users").doc(userId).collection("stocks").get();
+        for (const stockDoc of stocksSnap.docs) {
+          const symbol = stockDoc.id;
+          if (symbol) {
+            allStocksToUpdate.push({ userId, symbol, docId: stockDoc.id });
+            uniqueSymbolsSet.add(symbol);
+          }
+        }
+      }
+
+      const uniqueSymbols = Array.from(uniqueSymbolsSet);
+      console.log(`[Daily Batch] Starting, users=${usersSnap.size}, unique_stocks=${uniqueSymbols.length}`);
+
+      // Step 2: Query FinMind API for each unique symbol (Parallel calls, 5s timeout each)
+      const todayStr = moment().tz("Asia/Taipei").format("YYYY-MM-DD");
+      const priceMap = new Map<string, number>();
+      let pricesUpdated = 0;
+      let pricesFailed = 0;
+
+      await Promise.all(uniqueSymbols.map(async (symbol) => {
+        const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${symbol}&start_date=${todayStr}`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+        try {
+          const response = await fetch(url, { signal: controller.signal });
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            throw new Error(`HTTP error ${response.status}`);
+          }
+
+          const json = await response.json() as any;
+          if (json && json.status === 200 && Array.isArray(json.data) && json.data.length > 0) {
+            const latestData = json.data[json.data.length - 1];
+            const closePrice = Number(latestData.close);
+            if (!isNaN(closePrice) && closePrice > 0) {
+              priceMap.set(symbol, closePrice);
+              console.log(`[Price Refresh] Success: ${symbol} = ${closePrice} 元`);
+              pricesUpdated++;
+            } else {
+              console.error(`[Price Refresh] Failed: ${symbol}, reason: Invalid close price`);
+              pricesFailed++;
+            }
+          } else {
+            console.log(`[Price Refresh] No data returned from FinMind for ${symbol} on date ${todayStr} (could be weekend/before market close)`);
+            pricesFailed++;
+          }
+        } catch (err: any) {
+          clearTimeout(timeoutId);
+          console.error(`[Price Refresh] Failed: ${symbol}, reason: ${err.message || err}`);
+          pricesFailed++;
+        }
+      }));
+
+      // Step 3: Batch update prices in Firestore (merge: true)
+      const priceBatches: any[] = [];
+      let currentPriceBatch = adminDb.batch();
+      let priceBatchOpCount = 0;
+      priceBatches.push(currentPriceBatch);
+
+      const nowIso = new Date().toISOString();
+
+      for (const stockInfo of allStocksToUpdate) {
+        const { userId, symbol } = stockInfo;
+        const newPrice = priceMap.get(symbol);
+        if (newPrice !== undefined) {
+          const stockDocRef = adminDb.collection("users").doc(userId).collection("stocks").doc(symbol);
+          
+          currentPriceBatch.set(stockDocRef, {
+            currentPrice: newPrice,
+            priceUpdatedAt: nowIso,
+            dividendInfo: {
+              currentPrice: newPrice,
+              updatedAt: nowIso
+            }
+          }, { merge: true });
+
+          priceBatchOpCount++;
+          if (priceBatchOpCount >= 400) {
+            currentPriceBatch = adminDb.batch();
+            priceBatches.push(currentPriceBatch);
+            priceBatchOpCount = 0;
+          }
+        }
+      }
+
+      for (const b of priceBatches) {
+        await b.commit();
+      }
+
+      // Step 4: Take snapshots of portfolio values (user by user)
+      let snapshotsCreated = 0;
+      let snapshotsSkipped = 0;
+
+      const snapshotBatches: any[] = [];
+      let currentSnapshotBatch = adminDb.batch();
+      let snapshotBatchOpCount = 0;
+      snapshotBatches.push(currentSnapshotBatch);
+
+      for (const userDoc of usersSnap.docs) {
+        const userId = userDoc.id;
+        try {
+          const snapshotRef = adminDb.collection("users").doc(userId).collection("snapshots").doc(todayStr);
+          const existingSnapshotDoc = await snapshotRef.get();
+          
+          if (existingSnapshotDoc.exists) {
+            const existingData = existingSnapshotDoc.data();
+            if (existingData && existingData.createdAt) {
+              let createdAtDate: Date;
+              if (existingData.createdAt.toDate) {
+                createdAtDate = existingData.createdAt.toDate();
+              } else {
+                createdAtDate = new Date(existingData.createdAt);
+              }
+              const diffMs = Date.now() - createdAtDate.getTime();
+              const fourHoursMs = 4 * 60 * 60 * 1000;
+              if (diffMs < fourHoursMs) {
+                console.log(`[Snapshot] Skipped for user ${userId} (recent snapshot exists)`);
+                snapshotsSkipped++;
+                continue;
+              }
+            }
+          }
+
+          // Fetch user profile and cash
+          const userData = userDoc.exists ? userDoc.data() : {};
+          const cash = userData.cash !== undefined ? Number(userData.cash) : 0;
+
+          // Query stock documents (after price update commit)
+          const userStocksSnap = await adminDb.collection("users").doc(userId).collection("stocks").get();
+          const stocksList: any[] = [];
+          let totalStocksValue = 0;
+
+          for (const stockDoc of userStocksSnap.docs) {
+            const stockData = stockDoc.data();
+            const symbol = stockDoc.id;
+
+            const price = stockData.currentPrice !== undefined 
+              ? Number(stockData.currentPrice) 
+              : (stockData.dividendInfo?.currentPrice !== undefined ? Number(stockData.dividendInfo.currentPrice) : 0);
+
+            const shares = stockData.shares !== undefined ? Number(stockData.shares) : 0;
+            const stockValue = price * shares;
+            totalStocksValue += stockValue;
+
+            stocksList.push({
+              symbol,
+              shares,
+              currentPrice: price,
+              ...stockData
+            });
+          }
+
+          const totalValue = totalStocksValue + cash;
+
+          // Add user snapshot write to batch (overwrite/set)
+          currentSnapshotBatch.set(snapshotRef, {
+            date: todayStr,
+            stocks: stocksList,
+            cash: cash,
+            totalValue: totalValue,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+
+          console.log(`[Snapshot] Created for user ${userId} (stocks=${stocksList.length}, totalValue=${totalValue})`);
+          snapshotsCreated++;
+
+          snapshotBatchOpCount++;
+          if (snapshotBatchOpCount >= 400) {
+            currentSnapshotBatch = adminDb.batch();
+            snapshotBatches.push(currentSnapshotBatch);
+            snapshotBatchOpCount = 0;
+          }
+        } catch (userErr: any) {
+          console.error(`[Snapshot Error] Failed to generate snapshot for user ${userId}:`, userErr.message || userErr);
+        }
+      }
+
+      for (const b of snapshotBatches) {
+        await b.commit();
+      }
+
+      const elapsed = Date.now() - startTime;
+      console.log(`[Daily Batch] Complete: prices_updated=${pricesUpdated}, prices_failed=${pricesFailed}, snapshots_created=${snapshotsCreated}, elapsed=${elapsed} ms`);
+
+      return res.json({
+        success: true,
+        users: usersSnap.size,
+        prices: { updated: pricesUpdated, failed: pricesFailed },
+        snapshots: { created: snapshotsCreated, skipped: snapshotsSkipped },
+        elapsedMs: elapsed
+      });
+
+    } catch (err: any) {
+      console.error("[Daily Batch Fatal Error]:", err.message || err);
+      return res.status(500).json({
+        success: false,
+        error: err.message || err
+      });
     }
   });
 

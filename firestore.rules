@@ -87,6 +87,11 @@ service cloud.firestore {
         allow create, update: if isOwner(userId) && isValidStock(request.resource.data);
         allow delete: if isOwner(userId);
       }
+
+      match /snapshots/{snapshotId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow write: if false;
+      }
     }
 
     match /market_data/{symbol} {
