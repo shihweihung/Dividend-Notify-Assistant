@@ -100,20 +100,15 @@ service cloud.firestore {
     }
 
     match /telegram_chats/{chatId} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
 
     match /processed_messages/{docId} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
 
     match /rate_limits/{docId} {
-      allow read, write: if true;
-    }
-
-    // Default allow all for debugging
-    match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

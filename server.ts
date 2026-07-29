@@ -537,17 +537,12 @@ async function startServer() {
   startDailyUpdateScheduler();
 
   // API: Manually trigger update of all user stock prices & dividends
-  app.get("/api/admin/trigger-stock-update", async (req, res) => {
-    const key = req.query.key || req.headers['x-api-key'];
-    if (!process.env.API_SECRET_KEY || key === process.env.API_SECRET_KEY) {
-      console.log("[API] Manual stock update triggered via API.");
-      updateAllUserStocks().catch(err => {
-        console.error("[API Stock Update Error]", err);
-      });
-      return res.json({ success: true, message: "Stock update process triggered in background." });
-    } else {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  app.get("/api/admin/trigger-stock-update", apiKeyAuth, async (req, res) => {
+    console.log("[API] Manual stock update triggered via API.");
+    updateAllUserStocks().catch(err => {
+      console.error("[API Stock Update Error]", err);
+    });
+    return res.json({ success: true, message: "Stock update process triggered in background." });
   });
 
   // API: Save / Sync Telegram Chat Data
