@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   Plus, 
   Trash2, 
@@ -136,6 +136,55 @@ function MainApp() {
     return localStorage.getItem('telegram_chat_id') || '7654975919';
   });
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
+  const [snapshots, setSnapshots] = useState<{ date: string; stocks: any[] }[]>([]);
+  const [stockToDelete, setStockToDelete] = useState<{ symbol: string; name: string } | null>(null);
+  const [stockFilterTab, setStockFilterTab] = useState<'all' | 'active' | 'sold'>('all');
+
+  // Load historical snapshots for accurate ex-dividend date share calculation
+  useEffect(() => {
+    if (!isAuthReady || !user) {
+      setSnapshots([]);
+      return;
+    }
+    const snapshotsRef = collection(db, 'users', user.uid, 'snapshots');
+    const unsubscribe = onSnapshot(snapshotsRef, (snapshot) => {
+      const list = snapshot.docs.map(doc => doc.data() as { date: string; stocks: any[] });
+      list.sort((a, b) => a.date.localeCompare(b.date));
+      setSnapshots(list);
+    }, (err) => {
+      console.warn('[Snapshots] Warning:', err);
+    });
+
+    return () => unsubscribe();
+  }, [user, isAuthReady]);
+
+  // Helper to get exact shares held on or before a given ex-dividend date (exDateStr: YYYY-MM-DD)
+  const getSharesOnExDate = useCallback((symbol: string, exDateStr: string, currentShares: number): number => {
+    if (!snapshots || snapshots.length === 0 || !exDateStr) {
+      return currentShares;
+    }
+    
+    // Find snapshots on or before exDateStr
+    const validSnapshots = snapshots.filter(s => s.date <= exDateStr);
+    if (validSnapshots.length > 0) {
+      const latestSnap = validSnapshots[validSnapshots.length - 1];
+      const targetStock = latestSnap.stocks?.find((s: any) => s.symbol === symbol);
+      if (targetStock && targetStock.shares !== undefined) {
+        return Number(targetStock.shares);
+      }
+    }
+
+    // Fallback: If exDate is before the earliest snapshot, use earliest snapshot's shares
+    const earliestSnap = snapshots[0];
+    if (exDateStr < earliestSnap.date) {
+      const targetStock = earliestSnap.stocks?.find((s: any) => s.symbol === symbol);
+      if (targetStock && targetStock.shares !== undefined) {
+        return Number(targetStock.shares);
+      }
+    }
+
+    return currentShares;
+  }, [snapshots]);
 
   // Notification Helpers
   const requestNotificationPermission = async () => {
@@ -929,6 +978,7 @@ function MainApp() {
               const payKey = `${stock.symbol}-${payDateStr}`;
               if (!seenPayDates.has(payKey)) {
                 seenPayDates.add(payKey);
+                const effectiveShares = getSharesOnExDate(stock.symbol, exDateStr, stock.shares);
                 events.push({
                   date: payDate,
                   type: 'payment',
@@ -936,7 +986,7 @@ function MainApp() {
                   symbol: stock.symbol,
                   amount: (stock.manualDividendAdjustment !== null && stock.manualDividendAdjustment !== undefined)
                     ? stock.manualDividendAdjustment 
-                    : (div.amount || stock.dividendInfo?.amount || 0) * stock.shares
+                    : (div.amount || stock.dividendInfo?.amount || 0) * effectiveShares
                 });
               }
             }
@@ -956,6 +1006,7 @@ function MainApp() {
             });
           }
           if (payDate && !isNaN(payDate.getTime()) && payDate.getFullYear() === currentYear) {
+            const effectiveShares = getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate || '', stock.shares);
             events.push({
               date: payDate,
               type: 'payment',
@@ -963,14 +1014,14 @@ function MainApp() {
               symbol: stock.symbol,
               amount: (stock.manualDividendAdjustment !== null && stock.manualDividendAdjustment !== undefined)
                 ? stock.manualDividendAdjustment 
-                : stock.dividendInfo.amount * stock.shares
+                : stock.dividendInfo.amount * effectiveShares
             });
           }
         }
       }
     });
     return events;
-  }, [stocks]);
+  }, [stocks, getSharesOnExDate]);
 
   // Schedule Today's Notifications
   useEffect(() => {
@@ -1020,7 +1071,7 @@ function MainApp() {
     const monthlyBreakdown: { symbol: string; amount: number; isPending: boolean }[][] = Array.from({ length: 12 }, () => []);
 
     stocks.forEach(stock => {
-      if (stock.dividendInfo && stock.shares > 0) {
+      if (stock.dividendInfo) {
         let stockTotal = 0;
         const info = stock.dividendInfo;
         const symbol = stock.symbol;
@@ -1049,10 +1100,14 @@ function MainApp() {
             if (info.monthlyDistribution && Array.isArray(info.monthlyDistribution)) {
               info.monthlyDistribution.forEach((monthlyAmount, monthIdx) => {
                 if (monthIdx < 12 && monthlyAmount > 0) {
-                  const val = monthlyAmount * stock.shares;
-                  rAmount += val;
-                  monthlyReceivedTotals[monthIdx] += val;
-                  monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: false });
+                  const monthDateStr = `${selectedYear}-${String(monthIdx + 1).padStart(2, '0')}-15`;
+                  const effectiveShares = getSharesOnExDate(stock.symbol, monthDateStr, stock.shares);
+                  const val = monthlyAmount * effectiveShares;
+                  if (val > 0) {
+                    rAmount += val;
+                    monthlyReceivedTotals[monthIdx] += val;
+                    monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: false });
+                  }
                 }
               });
             }
@@ -1060,10 +1115,14 @@ function MainApp() {
             if (info.pendingMonthlyDistribution && Array.isArray(info.pendingMonthlyDistribution)) {
               info.pendingMonthlyDistribution.forEach((monthlyAmount, monthIdx) => {
                 if (monthIdx < 12 && monthlyAmount > 0) {
-                  const val = monthlyAmount * stock.shares;
-                  pAmount += val;
-                  monthlyPendingTotals[monthIdx] += val;
-                  monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: true });
+                  const monthDateStr = `${selectedYear}-${String(monthIdx + 1).padStart(2, '0')}-15`;
+                  const effectiveShares = getSharesOnExDate(stock.symbol, monthDateStr, stock.shares);
+                  const val = monthlyAmount * effectiveShares;
+                  if (val > 0) {
+                    pAmount += val;
+                    monthlyPendingTotals[monthIdx] += val;
+                    monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: true });
+                  }
                 }
               });
             }
@@ -1114,7 +1173,8 @@ function MainApp() {
               }
               
               if (pYear === selectedYear && pMonth >= 0 && pMonth < 12) {
-                const val = div.amount * stock.shares;
+                const effectiveShares = getSharesOnExDate(stock.symbol, div.date, stock.shares);
+                const val = div.amount * effectiveShares;
                 if (val > 0) {
                   let isPending = false;
                   if (selectedYear < currentYear) {
@@ -1166,7 +1226,7 @@ function MainApp() {
     }));
 
     return { received, pending, total, distributionData, monthlyData };
-  }, [stocks, selectedYear]);
+  }, [stocks, selectedYear, getSharesOnExDate]);
 
   const yearlyHistoryData = useMemo(() => {
     const today = startOfToday();
@@ -1181,7 +1241,7 @@ function MainApp() {
       const breakdown: Record<string, number> = {};
 
       stocks.forEach(stock => {
-        if (!stock.dividendInfo || stock.shares <= 0) return;
+        if (!stock.dividendInfo) return;
         const info = stock.dividendInfo;
         const symbol = stock.symbol;
         let stockTotalForYear = 0;
@@ -1201,17 +1261,21 @@ function MainApp() {
             let pAmount = 0;
 
             if (info.monthlyDistribution && Array.isArray(info.monthlyDistribution)) {
-              info.monthlyDistribution.forEach(monthlyAmount => {
+              info.monthlyDistribution.forEach((monthlyAmount, monthIdx) => {
                 if (monthlyAmount > 0) {
-                  rAmount += monthlyAmount * stock.shares;
+                  const monthDateStr = `${yr}-${String(monthIdx + 1).padStart(2, '0')}-15`;
+                  const effectiveShares = getSharesOnExDate(stock.symbol, monthDateStr, stock.shares);
+                  rAmount += monthlyAmount * effectiveShares;
                 }
               });
             }
 
             if (info.pendingMonthlyDistribution && Array.isArray(info.pendingMonthlyDistribution)) {
-              info.pendingMonthlyDistribution.forEach(monthlyAmount => {
+              info.pendingMonthlyDistribution.forEach((monthlyAmount, monthIdx) => {
                 if (monthlyAmount > 0) {
-                  pAmount += monthlyAmount * stock.shares;
+                  const monthDateStr = `${yr}-${String(monthIdx + 1).padStart(2, '0')}-15`;
+                  const effectiveShares = getSharesOnExDate(stock.symbol, monthDateStr, stock.shares);
+                  pAmount += monthlyAmount * effectiveShares;
                 }
               });
             }
@@ -1257,7 +1321,8 @@ function MainApp() {
               }
               
               if (pYear === yr) {
-                const val = div.amount * stock.shares;
+                const effectiveShares = getSharesOnExDate(stock.symbol, div.date, stock.shares);
+                const val = div.amount * effectiveShares;
                 if (val > 0) {
                   let isPending = false;
                   if (yr < currentYear) {
@@ -1294,7 +1359,7 @@ function MainApp() {
         breakdown
       };
     }).filter(s => s.total > 0 || s.year === currentYear);
-  }, [stocks]);
+  }, [stocks, getSharesOnExDate]);
 
   const [componentLimit, setComponentLimit] = useState<number>(10);
   const portfolioData = useMemo(() => {
@@ -2631,27 +2696,74 @@ function MainApp() {
                     <p className="text-sm text-slate-400 font-medium">尚未加入任何股票</p>
                   </div>
                 ) : (
-                  <div className="max-h-[560px] overflow-y-auto pr-1.5 space-y-3 custom-scrollbar">
-                    {stocks.map((stock) => (
-                      <motion.div 
-                        key={stock.symbol}
-                        layout
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-3 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 w-fit">
+                      <button
+                        onClick={() => setStockFilterTab('all')}
                         className={cn(
-                          "p-3 rounded-2xl shadow-sm border group relative transition-colors",
-                          darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+                          "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
+                          stockFilterTab === 'all' 
+                            ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                            : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                         )}
                       >
-                    <div className="flex justify-between items-start gap-2">
-                      <div className="flex-1 min-w-0">
-                        <h3 className={cn(
-                          "text-sm font-black leading-tight flex items-center flex-wrap gap-1.5",
-                          darkMode ? "text-slate-100" : "text-slate-800"
-                        )}>
-                          <span className="truncate">{stock.name}</span>
-                          {stock.dividendInfo?.isEtf && (
-                            <span className="px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 text-[8px] font-black uppercase shrink-0">ETF</span>
-                          )}
-                        </h3>
+                        全部 ({stocks.length})
+                      </button>
+                      <button
+                        onClick={() => setStockFilterTab('active')}
+                        className={cn(
+                          "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
+                          stockFilterTab === 'active' 
+                            ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                            : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                        )}
+                      >
+                        持股中 ({stocks.filter(s => s.shares > 0).length})
+                      </button>
+                      <button
+                        onClick={() => setStockFilterTab('sold')}
+                        className={cn(
+                          "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
+                          stockFilterTab === 'sold' 
+                            ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                            : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                        )}
+                      >
+                        已清倉 ({stocks.filter(s => s.shares === 0).length})
+                      </button>
+                    </div>
+
+                    <div className="max-h-[560px] overflow-y-auto pr-1.5 space-y-3 custom-scrollbar">
+                      {stocks
+                        .filter(stock => {
+                          if (stockFilterTab === 'active') return stock.shares > 0;
+                          if (stockFilterTab === 'sold') return stock.shares === 0;
+                          return true;
+                        })
+                        .map((stock) => (
+                          <motion.div 
+                            key={stock.symbol}
+                            layout
+                            className={cn(
+                              "p-3 rounded-2xl shadow-sm border group relative transition-colors",
+                              darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100",
+                              stock.shares === 0 && "opacity-80"
+                            )}
+                          >
+                        <div className="flex justify-between items-start gap-2">
+                          <div className="flex-1 min-w-0">
+                            <h3 className={cn(
+                              "text-sm font-black leading-tight flex items-center flex-wrap gap-1.5",
+                              darkMode ? "text-slate-100" : "text-slate-800"
+                            )}>
+                              <span className="truncate">{stock.name}</span>
+                              {stock.dividendInfo?.isEtf && (
+                                <span className="px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 text-[8px] font-black uppercase shrink-0">ETF</span>
+                              )}
+                              {stock.shares === 0 && (
+                                <span className="px-1.5 py-0.5 rounded-md bg-slate-500/20 text-slate-400 text-[8px] font-black shrink-0">已清倉</span>
+                              )}
+                            </h3>
                         <div className="flex items-center gap-2">
                           <p className="text-[10px] font-bold text-slate-400">{stock.symbol}</p>
                           {stock.dividendInfo?.currentPrice && (
@@ -2705,12 +2817,12 @@ function MainApp() {
                           <RefreshCw className={cn("w-3.5 h-3.5", refreshingStocks.has(stock.symbol) && "animate-spin")} />
                         </button>
                         <button 
-                          onClick={() => handleRemoveStock(stock.symbol)}
+                          onClick={() => setStockToDelete({ symbol: stock.symbol, name: stock.name })}
                           className={cn(
-                            "p-1.5 rounded-lg transition-colors",
+                            "p-1.5 rounded-lg transition-colors cursor-pointer",
                             darkMode ? "text-slate-400 hover:bg-red-900/30 hover:text-red-400" : "text-slate-400 hover:bg-red-50 hover:text-red-500"
                           )}
-                          title="刪除"
+                          title="刪除或清倉"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -2790,7 +2902,12 @@ function MainApp() {
                               "text-[10px] sm:text-xs font-bold whitespace-nowrap",
                               darkMode ? "text-emerald-400" : "text-emerald-700"
                             )}>
-                              ${(((stock.dividendInfo as any).receivedAmountCurrentYear || (stock.dividendInfo as any).receivedAmount2026 || 0) * stock.shares).toLocaleString()}
+                              {(() => {
+                                const exDateForCalc = stock.dividendInfo?.exDividendDate || `${new Date().getFullYear()}-06-15`;
+                                const effectiveExShares = getSharesOnExDate(stock.symbol, exDateForCalc, stock.shares);
+                                const recAmt = ((stock.dividendInfo as any).receivedAmountCurrentYear || (stock.dividendInfo as any).receivedAmount2026 || 0) * effectiveExShares;
+                                return `$${recAmt.toLocaleString()}`;
+                              })()}
                             </p>
                           </div>
                           <div className={cn(
@@ -2927,7 +3044,7 @@ function MainApp() {
                                 `$${stock.manualDividendAdjustment.toLocaleString()}`
                               ) : (
                                 stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString()) 
-                                  ? `$${(stock.dividendInfo.amount * stock.shares).toLocaleString()}`
+                                  ? `$${(stock.dividendInfo.amount * getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate, stock.shares)).toLocaleString()}`
                                   : '尚未公佈'
                               )}
                             </p>
@@ -2962,10 +3079,11 @@ function MainApp() {
                       </motion.div>
                     ))}
                   </div>
-                )}
-              </div>
-            </motion.div>
-          )}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        )}
         </div>
 
         {/* Portfolio Dashboard - Moved to bottom */}
@@ -3137,6 +3255,71 @@ function MainApp() {
             ))}
           </div>
         </div>
+
+        {/* Clear / Delete Stock Confirmation Modal */}
+        <AnimatePresence>
+          {stockToDelete && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className={cn(
+                  "w-full max-w-sm p-5 rounded-2xl shadow-2xl border space-y-4",
+                  darkMode ? "bg-slate-900 border-slate-800 text-slate-100" : "bg-white border-slate-100 text-slate-800"
+                )}
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full bg-amber-500/10 text-amber-500 flex items-center justify-center shrink-0">
+                    <AlertCircle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black">清倉或刪除股票</h3>
+                    <p className="text-xs text-slate-400">{stockToDelete.name} ({stockToDelete.symbol})</p>
+                  </div>
+                </div>
+
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  請問您要如何處置這檔股票？選擇「設為已清倉」可以將張數變更為 0，並**完整保留這檔股票過去的領息紀錄與歷年報表數據**。
+                </p>
+
+                <div className="space-y-2 pt-1">
+                  <button
+                    onClick={() => {
+                      handleUpdateShares(stockToDelete.symbol, 0);
+                      setStockToDelete(null);
+                    }}
+                    className="w-full py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs shadow-md transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <span>設為已清倉 (張數改為 0)</span>
+                    <span className="text-[10px] opacity-80">(推薦: 保留歷史股息)</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleRemoveStock(stockToDelete.symbol);
+                      setStockToDelete(null);
+                    }}
+                    className="w-full py-2.5 px-4 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-500 font-bold text-xs transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>徹底刪除 (包含清除歷史股息數據)</span>
+                  </button>
+
+                  <button
+                    onClick={() => setStockToDelete(null)}
+                    className={cn(
+                      "w-full py-2 px-4 rounded-xl font-bold text-xs transition-all cursor-pointer",
+                      darkMode ? "text-slate-400 hover:bg-slate-800" : "text-slate-500 hover:bg-slate-100"
+                    )}
+                  >
+                    取消
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
       </main>
       <style>{`
         .custom-scrollbar::-webkit-scrollbar {
