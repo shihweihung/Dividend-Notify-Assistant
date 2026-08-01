@@ -8,6 +8,9 @@
         "symbol": { "type": "string", "description": "The stock symbol (e.g., 2330.TW)" },
         "name": { "type": "string", "description": "The name of the company" },
         "shares": { "type": "number", "description": "Number of shares held" },
+        "cost": { "type": "number", "description": "Purchase cost per share" },
+        "currentPrice": { "type": "number", "description": "Current market price of stock" },
+        "priceUpdatedAt": { "type": "string", "description": "Timestamp when price was updated" },
         "dividendInfo": {
           "type": "object",
           "properties": {

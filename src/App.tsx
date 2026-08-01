@@ -138,10 +138,10 @@ function MainApp() {
   const [isEditingCash, setIsEditingCash] = useState(false);
   const [cashInput, setCashInput] = useState('');
   const [telegramBotToken, setTelegramBotToken] = useState(() => {
-    return localStorage.getItem('telegram_bot_token') || '8242721109:AAERtesLIWGtwtCKKQRfDUxlEa8yBFt5sPM';
+    return localStorage.getItem('telegram_bot_token') || '';
   });
   const [telegramChatId, setTelegramChatId] = useState(() => {
-    return localStorage.getItem('telegram_chat_id') || '7654975919';
+    return localStorage.getItem('telegram_chat_id') || '';
   });
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
   const [snapshots, setSnapshots] = useState<{ date: string; stocks: any[] }[]>([]);
@@ -343,12 +343,12 @@ function MainApp() {
           if (userData.telegramBotToken !== undefined && userData.telegramBotToken !== '') {
             setTelegramBotToken(userData.telegramBotToken);
           } else {
-            setTelegramBotToken('8242721109:AAERtesLIWGtwtCKKQRfDUxlEa8yBFt5sPM');
+            setTelegramBotToken('');
           }
           if (userData.telegramChatId !== undefined && userData.telegramChatId !== '') {
             setTelegramChatId(userData.telegramChatId);
           } else {
-            setTelegramChatId('7654975919');
+            setTelegramChatId('');
           }
         }
       }, (err) => {
@@ -365,65 +365,65 @@ function MainApp() {
       }
       const savedBotToken = localStorage.getItem('telegram_bot_token');
       const savedChatId = localStorage.getItem('telegram_chat_id');
-      setTelegramBotToken(savedBotToken || '8242721109:AAERtesLIWGtwtCKKQRfDUxlEa8yBFt5sPM');
-      setTelegramChatId(savedChatId || '7654975919');
+      setTelegramBotToken(savedBotToken || '');
+      setTelegramChatId(savedChatId || '');
     }
   }, [user, isAuthReady]);
 
   // Synchronize Telegram Chat Data with server JSON Database
   useEffect(() => {
-    if (telegramChatId && telegramBotToken) {
-      const syncChatData = async () => {
-        try {
-          await fetch('/api/telegram/save-chat-data', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_API_SECRET_KEY },
-            body: JSON.stringify({
-              chatId: telegramChatId,
-              botToken: telegramBotToken,
-              cash: cash,
-              stocks: stocks,
-              username: user ? (user.displayName || user.email) : '投資大師'
-            })
-          });
-        } catch (e) {
-          console.error('Failed to sync Telegram chat data to backend:', e);
-        }
-      };
+    if (!user || !telegramChatId || !telegramBotToken) return;
 
-      const timer = setTimeout(syncChatData, 1200);
-      return () => clearTimeout(timer);
-    }
+    const syncChatData = async () => {
+      try {
+        await authenticatedFetch('/api/telegram/save-chat-data', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chatId: telegramChatId,
+            botToken: telegramBotToken,
+            cash: cash,
+            stocks: stocks,
+            username: user ? (user.displayName || user.email) : '投資大師'
+          })
+        });
+      } catch (e) {
+        console.error('Failed to sync Telegram chat data to backend:', e);
+      }
+    };
+
+    const timer = setTimeout(syncChatData, 1200);
+    return () => clearTimeout(timer);
   }, [telegramChatId, telegramBotToken, cash, stocks, user]);
 
   // Auto-Register Telegram Webhook in background to ensure it always points to the active dev/prod domain
   useEffect(() => {
-    if (telegramBotToken) {
-      const registerWebhook = async () => {
-        try {
-          const response = await fetch('/api/telegram/register-webhook', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_API_SECRET_KEY },
-            body: JSON.stringify({
-              botToken: telegramBotToken,
-              baseUrl: window.location.origin
-            })
-          });
-          const data = await response.json();
-          if (response.ok && data.success) {
-            console.log('🤖 Telegram Webhook automatically registered successfully:', data.description);
-          } else {
-            console.warn('Telegram Webhook registration issue on boot:', data.error);
-          }
-        } catch (err) {
-          console.error('Failed to auto-register Telegram webhook:', err);
-        }
-      };
+    if (!user || !telegramBotToken) return;
 
-      const timer = setTimeout(registerWebhook, 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [telegramBotToken]);
+    const registerWebhook = async () => {
+      try {
+        const response = await authenticatedFetch('/api/telegram/register-webhook', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            botToken: telegramBotToken,
+            baseUrl: window.location.origin
+          })
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+          console.log('🤖 Telegram Webhook automatically registered successfully:', data.description);
+        } else {
+          console.warn('Telegram Webhook registration issue on boot:', data.error);
+        }
+      } catch (err) {
+        console.error('Failed to auto-register Telegram webhook:', err);
+      }
+    };
+
+    const timer = setTimeout(registerWebhook, 2000);
+    return () => clearTimeout(timer);
+  }, [telegramBotToken, user]);
 
   // Migration
   useEffect(() => {
@@ -1386,9 +1386,9 @@ function MainApp() {
     // 動態向 Telegram 註冊此 Webhook，實現雙向即時對話
     if (token) {
       try {
-        const response = await fetch('/api/telegram/register-webhook', {
+        const response = await authenticatedFetch('/api/telegram/register-webhook', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-api-key': import.meta.env.VITE_API_SECRET_KEY },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             botToken: token,
             baseUrl: window.location.origin
@@ -1460,11 +1460,10 @@ function MainApp() {
       `👉 _此推播報告由「息引力」資產守護助理動態生成發送。_`;
 
     try {
-      const response = await fetch('/api/telegram/send', {
+      const response = await authenticatedFetch('/api/telegram/send', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': import.meta.env.VITE_API_SECRET_KEY,
         },
         body: JSON.stringify({
           botToken: telegramBotToken,
@@ -1653,7 +1652,7 @@ function MainApp() {
                                 <input
                                   type="number"
                                   step="0.01"
-                                  placeholder="買入單價(選填)"
+                                  placeholder="成本單價(選填)"
                                   value={newCost || ''}
                                   onFocus={(e) => e.target.select()}
                                   onChange={(e) => setNewCost(e.target.value === '' ? 0 : Number(e.target.value))}
@@ -2680,18 +2679,9 @@ function MainApp() {
                             </p>
                           )}
                           {stock.dividendInfo?.updatedAt && (
-                            <div className="text-[8px] text-slate-500 font-medium flex items-center gap-1 flex-wrap">
-                              <span>更新於: {new Date(stock.dividendInfo.updatedAt).toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</span>
-                              {stock.dividendInfo.source && (
-                                <span>
-                                  (來源: {stock.dividendInfo.sourceUrl ? (
-                                    <a href={stock.dividendInfo.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-500 underline">
-                                      {stock.dividendInfo.source}
-                                    </a>
-                                  ) : stock.dividendInfo.source})
-                                </span>
-                              )}
-                            </div>
+                            <span className="text-[8px] text-slate-500 font-medium">
+                              更新於: {new Date(stock.dividendInfo.updatedAt).toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}
+                            </span>
                           )}
                         </div>
                       </div>
@@ -2800,191 +2790,157 @@ function MainApp() {
                           )}
                         </AnimatePresence>
 
-                        <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
-                          <div className={cn(
-                            "p-1.5 sm:p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-emerald-950/20" : "bg-emerald-50/30"
-                          )}>
-                            <p className="text-[7px] sm:text-[8px] font-bold text-emerald-500 uppercase truncate">今年已領</p>
-                            <p className={cn(
-                              "text-[10px] sm:text-xs font-bold whitespace-nowrap",
-                              darkMode ? "text-emerald-400" : "text-emerald-700"
-                            )}>
-                              {(() => {
-                                const exDateForCalc = stock.dividendInfo?.exDividendDate || `${new Date().getFullYear()}-06-15`;
-                                const effectiveExShares = getSharesOnExDate(stock.symbol, exDateForCalc, stock.shares);
-                                const recAmt = ((stock.dividendInfo as any).receivedAmountCurrentYear || (stock.dividendInfo as any).receivedAmount2026 || 0) * effectiveExShares;
-                                return `$${recAmt.toLocaleString()}`;
-                              })()}
-                            </p>
+                        {/* 1. 持股與成本輸入 (User Inputs) */}
+                        <div className={cn(
+                          "grid grid-cols-2 gap-2 p-2.5 sm:p-3 rounded-2xl transition-colors",
+                          darkMode ? "bg-slate-800/80 border border-slate-700/50" : "bg-slate-50 border border-slate-200/60"
+                        )}>
+                          <div>
+                            <p className="text-[10px] sm:text-xs font-bold text-indigo-400 uppercase tracking-wide mb-1">持有股數</p>
+                            <input
+                              type="number"
+                              key={`shares-${stock.symbol}-${stock.shares}`}
+                              defaultValue={stock.shares || ''}
+                              onFocus={(e) => e.target.select()}
+                              onBlur={(e) => handleUpdateShares(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
+                              className={cn(
+                                "w-full text-xs sm:text-sm font-black bg-transparent border-none p-0 focus:ring-0 focus:outline-none",
+                                darkMode ? "text-slate-100" : "text-slate-800"
+                              )}
+                            />
                           </div>
-                          <div className={cn(
-                            "p-1.5 sm:p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-amber-950/20" : "bg-amber-50/30"
-                          )}>
-                            <p className="text-[7px] sm:text-[8px] font-bold text-amber-500 uppercase truncate">今年未領</p>
-                            <p className={cn(
-                              "text-[10px] sm:text-xs font-bold whitespace-nowrap",
-                              darkMode ? "text-amber-400" : "text-amber-700"
-                            )}>
-                              ${(((stock.dividendInfo as any).pendingAmountCurrentYear || (stock.dividendInfo as any).pendingAmount2026 || 0) * stock.shares).toLocaleString()}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
-                          <div className={cn(
-                            "p-1.5 sm:p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-slate-800" : "bg-slate-50"
-                          )}>
-                            <p className="text-[7px] sm:text-[8px] font-bold text-slate-400 uppercase truncate">除息日</p>
-                            <p className={cn(
-                              "text-[10px] sm:text-xs font-bold whitespace-nowrap",
-                              darkMode ? "text-slate-200" : "text-slate-700"
-                            )}>
-                              {stock.dividendInfo.exDividendDate || '未定'}
-                            </p>
-                          </div>
-                          <div className={cn(
-                            "p-1.5 sm:p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-slate-800" : "bg-slate-50"
-                          )}>
-                            <p className="text-[7px] sm:text-[8px] font-bold text-slate-400 uppercase truncate">發放日</p>
-                            <p className={cn(
-                              "text-[10px] sm:text-xs font-bold whitespace-nowrap",
-                              darkMode ? "text-slate-200" : "text-slate-700"
-                            )}>
-                              {stock.dividendInfo.paymentDate || '未定'}
-                            </p>
+                          <div>
+                            <p className="text-[10px] sm:text-xs font-bold text-amber-500 uppercase tracking-wide mb-1">成本單價</p>
+                            <input
+                              type="number"
+                              step="0.01"
+                              key={`cost-${stock.symbol}-${stock.cost ?? ''}`}
+                              defaultValue={stock.cost ?? ''}
+                              placeholder="未設定"
+                              onFocus={(e) => e.target.select()}
+                              onBlur={(e) => handleUpdateCost(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
+                              className={cn(
+                                "w-full text-xs sm:text-sm font-black bg-transparent border-none p-0 focus:ring-0 focus:outline-none placeholder:text-slate-400/50",
+                                darkMode ? "text-slate-100" : "text-slate-800"
+                              )}
+                            />
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-1.5 sm:gap-2">
-                          <div className={cn(
-                            "p-1.5 sm:p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-slate-800" : "bg-slate-50"
-                          )}>
-                            <p className="text-[7px] sm:text-[8px] font-bold text-slate-400 uppercase truncate">現值</p>
-                            <p className={cn(
-                              "text-[10px] sm:text-xs font-bold whitespace-nowrap",
-                              darkMode ? "text-slate-200" : "text-slate-700"
-                            )}>
-                              ${((stock.dividendInfo.currentPrice || 0) * stock.shares).toLocaleString()}
-                            </p>
-                          </div>
-                          <div className={cn(
-                            "p-1.5 sm:p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-slate-800" : "bg-slate-50"
-                          )}>
-                            <p className="text-[7px] sm:text-[8px] font-bold text-slate-400 uppercase truncate">殖利率</p>
-                            <p className="text-[10px] sm:text-xs font-bold text-emerald-500 whitespace-nowrap">
-                              {stock.dividendInfo.yield?.toFixed(2) || '0.00'}%
-                            </p>
-                          </div>
-                          <div className={cn(
-                            "p-1.5 sm:p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-slate-800" : "bg-slate-50"
-                          )}>
-                            <p className="text-[7px] sm:text-[8px] font-bold text-slate-400 uppercase truncate">佔比</p>
-                            <p className="text-[10px] sm:text-xs font-bold text-indigo-500 whitespace-nowrap">
-                              {portfolioData.totalValue > 0 
-                                ? (((stock.dividendInfo.currentPrice || 0) * stock.shares / portfolioData.totalValue) * 100).toFixed(1) 
-                                : '0.0'}%
-                            </p>
-                          </div>
-                        </div>
-                        
-                        <div className="grid grid-cols-2 gap-2">
-                          <div className={cn(
-                            "flex items-center gap-2 p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-indigo-950/20" : "bg-indigo-50/30"
-                          )}>
-                            <div className="flex-1">
-                              <p className="text-[8px] font-bold text-indigo-400 uppercase">持有股數</p>
-                              <input
-                                type="number"
-                                key={`shares-${stock.symbol}-${stock.shares}`}
-                                defaultValue={stock.shares || ''}
-                                onFocus={(e) => e.target.select()}
-                                onBlur={(e) => handleUpdateShares(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
-                                className={cn(
-                                  "w-full text-xs font-bold bg-transparent border-none p-0 focus:ring-0 focus:outline-none",
-                                  darkMode ? "text-slate-100" : "text-slate-700"
-                                )}
-                              />
-                            </div>
-                          </div>
-                          <div className={cn(
-                            "flex items-center gap-2 p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-amber-950/20" : "bg-amber-50/30"
-                          )}>
-                            <div className="flex-1">
-                              <p className="text-[8px] font-bold text-amber-500 uppercase">買入單價 (成本)</p>
-                              <input
-                                type="number"
-                                step="0.01"
-                                key={`cost-${stock.symbol}-${stock.cost ?? ''}`}
-                                defaultValue={stock.cost ?? ''}
-                                placeholder="未設定"
-                                onFocus={(e) => e.target.select()}
-                                onBlur={(e) => handleUpdateCost(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
-                                className={cn(
-                                  "w-full text-xs font-bold bg-transparent border-none p-0 focus:ring-0 focus:outline-none placeholder:text-slate-400/50",
-                                  darkMode ? "text-slate-100" : "text-slate-700"
-                                )}
-                              />
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Cost & Profit Calculation Card */}
-                        {stock.cost && stock.cost > 0 ? (
-                          <div className={cn(
-                            "grid grid-cols-2 gap-2 p-2 rounded-xl transition-colors",
-                            darkMode ? "bg-slate-800/60" : "bg-slate-100/70"
-                          )}>
+                        {/* 2. 資產與損益概況 (Asset, P&L, Yield, Ratio) */}
+                        <div className={cn(
+                          "p-2.5 sm:p-3 rounded-2xl space-y-2 transition-colors",
+                          darkMode ? "bg-slate-800/50 border border-slate-800" : "bg-slate-100/60 border border-slate-200/40"
+                        )}>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                             <div>
-                              <p className="text-[8px] font-bold text-slate-400 uppercase">總成本</p>
-                              <p className={cn("text-xs font-black", darkMode ? "text-slate-200" : "text-slate-700")}>
-                                ${Math.round(stock.cost * stock.shares).toLocaleString()}
+                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">現值</p>
+                              <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
+                                ${((stock.dividendInfo.currentPrice || 0) * stock.shares).toLocaleString()}
                               </p>
                             </div>
                             <div>
-                              <p className="text-[8px] font-bold text-slate-400 uppercase">未實現損益</p>
+                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">總成本</p>
+                              <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
+                                {stock.cost && stock.cost > 0 ? `$${Math.round(stock.cost * stock.shares).toLocaleString()}` : '未設定'}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">殖利率</p>
+                              <p className="text-xs sm:text-sm font-black text-emerald-500 truncate">
+                                {stock.dividendInfo.yield?.toFixed(2) || '0.00'}%
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">佔比</p>
+                              <p className="text-xs sm:text-sm font-black text-indigo-500 truncate">
+                                {portfolioData.totalValue > 0 
+                                  ? (((stock.dividendInfo.currentPrice || 0) * stock.shares / portfolioData.totalValue) * 100).toFixed(1) 
+                                  : '0.0'}%
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* 未實現損益 (If cost is provided) */}
+                          {stock.cost && stock.cost > 0 ? (
+                            <div className={cn(
+                              "pt-2 mt-2 border-t flex justify-between items-center",
+                              darkMode ? "border-slate-700/60" : "border-slate-200/80"
+                            )}>
+                              <p className="text-[10px] sm:text-xs font-bold text-slate-400">未實現損益</p>
                               <p className={cn(
-                                "text-xs font-black",
+                                "text-xs sm:text-sm font-black",
                                 ((stock.dividendInfo.currentPrice || 0) * stock.shares - stock.cost * stock.shares) >= 0 
                                   ? "text-rose-500" 
                                   : "text-emerald-500"
                               )}>
                                 {((stock.dividendInfo.currentPrice || 0) * stock.shares - stock.cost * stock.shares) >= 0 ? '+' : ''}
                                 ${Math.round((stock.dividendInfo.currentPrice || 0) * stock.shares - stock.cost * stock.shares).toLocaleString()}
-                                <span className="text-[9px] font-bold ml-1">
+                                <span className="text-[10px] font-bold ml-1">
                                   ({(((stock.dividendInfo.currentPrice || 0) * stock.shares - stock.cost * stock.shares) / (stock.cost * stock.shares) * 100).toFixed(1)}%)
                                 </span>
                               </p>
                             </div>
-                          </div>
-                        ) : null}
-                        
+                          ) : null}
+                        </div>
+
+                        {/* 3. 股息領取與日程 (Dividend Estimates & Dates) */}
                         <div className={cn(
-                          "flex items-center justify-between p-2 rounded-xl transition-colors",
-                          darkMode ? "bg-indigo-950/20" : "bg-indigo-50/30"
+                          "p-2.5 sm:p-3 rounded-2xl space-y-2.5 transition-colors",
+                          darkMode ? "bg-slate-900/60 border border-slate-800" : "bg-white border border-slate-100 shadow-xs"
                         )}>
-                          <div className="flex-1">
-                            <p className="text-[8px] font-bold text-indigo-400 uppercase">
-                              本次預計領取
-                            </p>
-                            <p className={cn(
-                              "text-xs font-black",
+                          {/* 本次預計領取 */}
+                          <div className={cn(
+                            "p-2 sm:p-2.5 rounded-xl flex items-center justify-between",
+                            darkMode ? "bg-indigo-950/40 border border-indigo-900/40" : "bg-indigo-50/60 border border-indigo-100"
+                          )}>
+                            <span className="text-[10px] sm:text-xs font-bold text-indigo-400 uppercase">本次預計領取</span>
+                            <span className={cn(
+                              "text-xs sm:text-sm font-black",
                               !stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString())
-                                ? "text-slate-400 text-[10px]"
+                                ? "text-slate-400 text-xs"
                                 : "text-indigo-500"
                             )}>
                               {stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString()) 
                                 ? `$${(stock.dividendInfo.amount * getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate, stock.shares)).toLocaleString()}`
                                 : '尚未公佈'}
-                            </p>
+                            </span>
+                          </div>
+
+                          {/* 今年已領 / 今年未領 / 除息日 / 發放日 2x2 Grid */}
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                            <div className={cn("p-2 rounded-xl", darkMode ? "bg-emerald-950/20" : "bg-emerald-50/30")}>
+                              <p className="text-[9px] sm:text-[10px] font-bold text-emerald-500 uppercase">今年已領</p>
+                              <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-emerald-400" : "text-emerald-700")}>
+                                {(() => {
+                                  const exDateForCalc = stock.dividendInfo?.exDividendDate || `${new Date().getFullYear()}-06-15`;
+                                  const effectiveExShares = getSharesOnExDate(stock.symbol, exDateForCalc, stock.shares);
+                                  const recAmt = ((stock.dividendInfo as any).receivedAmountCurrentYear || (stock.dividendInfo as any).receivedAmount2026 || 0) * effectiveExShares;
+                                  return `$${recAmt.toLocaleString()}`;
+                                })()}
+                              </p>
+                            </div>
+
+                            <div className={cn("p-2 rounded-xl", darkMode ? "bg-amber-950/20" : "bg-amber-50/30")}>
+                              <p className="text-[9px] sm:text-[10px] font-bold text-amber-500 uppercase">今年未領</p>
+                              <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-amber-400" : "text-amber-700")}>
+                                ${(((stock.dividendInfo as any).pendingAmountCurrentYear || (stock.dividendInfo as any).pendingAmount2026 || 0) * stock.shares).toLocaleString()}
+                              </p>
+                            </div>
+
+                            <div className={cn("p-2 rounded-xl", darkMode ? "bg-slate-800/80" : "bg-slate-100/70")}>
+                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">除息日</p>
+                              <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-slate-200" : "text-slate-700")}>
+                                {stock.dividendInfo.exDividendDate || '未定'}
+                              </p>
+                            </div>
+
+                            <div className={cn("p-2 rounded-xl", darkMode ? "bg-slate-800/80" : "bg-slate-100/70")}>
+                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">發放日</p>
+                              <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-slate-200" : "text-slate-700")}>
+                                {stock.dividendInfo.paymentDate || '未定'}
+                              </p>
+                            </div>
                           </div>
                         </div>
                       </div>

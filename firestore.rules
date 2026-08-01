@@ -65,10 +65,13 @@ service cloud.firestore {
     }
 
     function isValidStock(data) {
-      return hasOnlyAllowedFields(['symbol', 'name', 'shares', 'dividendInfo', 'updatedAt', 'manualDividendAdjustment']) &&
+      return hasOnlyAllowedFields(['symbol', 'name', 'shares', 'cost', 'currentPrice', 'priceUpdatedAt', 'dividendInfo', 'updatedAt', 'manualDividendAdjustment']) &&
              data.symbol is string && data.symbol.size() > 0 && data.symbol.size() < 20 &&
              data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
              data.shares is number && data.shares >= 0 &&
+             (!('cost' in data) || data.cost == null || data.cost is number) &&
+             (!('currentPrice' in data) || data.currentPrice == null || data.currentPrice is number) &&
+             (!('priceUpdatedAt' in data) || data.priceUpdatedAt == null || data.priceUpdatedAt is string || data.priceUpdatedAt is timestamp) &&
              (!('manualDividendAdjustment' in data) || data.manualDividendAdjustment == null || data.manualDividendAdjustment is number);
     }
 
