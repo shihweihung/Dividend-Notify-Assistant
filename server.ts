@@ -7,6 +7,7 @@ import fs from "fs";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import { fetchStockDataFromTwse } from "./src/services/twseService";
+import { fetchDividendData } from "./src/services/geminiService";
 import moment from "moment-timezone";
 
 const __dirname = process.cwd();
@@ -198,10 +199,24 @@ async function startServer() {
 
   const apiKeyAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const apiKey = req.headers['x-api-key'];
-    if (apiKey && apiKey === process.env.API_SECRET_KEY) {
+    if (process.env.API_SECRET_KEY && apiKey === process.env.API_SECRET_KEY) {
       next();
     } else {
       res.status(401).json({ error: 'Unauthorized: Invalid or missing API key' });
+    }
+  };
+
+  const firebaseAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const idToken = req.headers.authorization?.split('Bearer ')[1];
+    if (!idToken) {
+      return res.status(401).json({ error: 'Unauthorized: Missing ID token' });
+    }
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      (req as any).user = decodedToken;
+      next();
+    } catch (error) {
+      res.status(401).json({ error: 'Unauthorized: Invalid ID token' });
     }
   };
 
@@ -513,6 +528,11 @@ async function startServer() {
   function startDailyUpdateScheduler() {
     console.log("[Scheduler] Daily stock update scheduler started.");
     
+    // Asynchronously run batch on server startup to ensure today's snapshot exists
+    setTimeout(() => {
+      runDailyBatchCore().catch(err => console.error("[Startup Daily Batch Error]", err));
+    }, 3000);
+
     setInterval(async () => {
       try {
         const taipeiTime = moment().tz("Asia/Taipei");
@@ -546,7 +566,7 @@ async function startServer() {
   });
 
   // API: Save / Sync Telegram Chat Data
-  app.post("/api/telegram/save-chat-data", apiKeyAuth, async (req, res) => {
+  app.post("/api/telegram/save-chat-data", firebaseAuth, async (req, res) => {
     try {
       const { chatId, botToken, cash, stocks, username } = req.body;
       if (!chatId) {
@@ -573,7 +593,7 @@ async function startServer() {
   });
 
   // API: Send Telegram Alert / Report
-  app.post("/api/telegram/send", apiKeyAuth, async (req, res) => {
+  app.post("/api/telegram/send", firebaseAuth, async (req, res) => {
     const { botToken, chatId, message } = req.body;
 
     if (!botToken || !chatId || !message) {
@@ -955,7 +975,7 @@ async function startServer() {
   });
 
   // API: Register Telegram Webhook (Dynamic Selection based on Host Environment)
-  app.post("/api/telegram/register-webhook", apiKeyAuth, async (req, res) => {
+  app.post("/api/telegram/register-webhook", firebaseAuth, async (req, res) => {
     let { botToken, baseUrl } = req.body;
     if (!botToken) {
       return res.status(400).json({ error: "缺少 botToken" });
@@ -1093,7 +1113,13 @@ async function startServer() {
         console.log(`🤖 [Telegram Bot] Deactivating Webhooks to switch to getUpdates for bot: ${token.substring(0, 12)}...`);
         const delRes = await fetch(`https://api.telegram.org/bot${token}/deleteWebhook`);
         const delData = await delRes.json();
-        console.log(`🤖 [Telegram Bot] Webhook removal result on boot:`, delData);
+        if (delData.ok) {
+          console.log(`🤖 [Telegram Bot] Webhook removal result on boot:`, delData);
+        } else if (delData.error_code === 401) {
+          console.warn(`🤖 [Telegram Bot] Webhook removal failed for bot (Unauthorized/Invalid Token)`);
+        } else {
+          console.log(`🤖 [Telegram Bot] Webhook removal result on boot:`, delData);
+        }
       } catch (err) {
         console.error(`🤖 [Telegram Bot] Webhook removal error for bot ${token.substring(0, 10)}:`, err);
       }
@@ -1114,7 +1140,7 @@ async function startServer() {
   startTelegramPolling();
 
   // API: Fetch Dividend Data via Gemini
-  app.get("/api/dividend/:symbol", apiKeyAuth, async (req, res) => {
+  app.get("/api/dividend/:symbol", firebaseAuth, async (req, res) => {
     const { symbol } = req.params;
     const apiKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
     
@@ -1124,8 +1150,6 @@ async function startServer() {
     }
 
     try {
-      const servicePath = path.join(__dirname, "src", "services", "geminiService.ts");
-      const { fetchDividendData } = await import(servicePath);
       const data = await fetchDividendData(symbol);
       if (!data) {
         return res.status(404).json({ error: "找不到該股票的資料" });

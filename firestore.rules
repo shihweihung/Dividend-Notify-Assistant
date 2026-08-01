@@ -52,13 +52,16 @@ service cloud.firestore {
 
     // Domain Validators
     function isValidUserProfile(data) {
-      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'photoURL', 'lastLogin', 'role']) &&
+      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'photoURL', 'lastLogin', 'role', 'cash', 'telegramBotToken', 'telegramChatId']) &&
              data.uid is string && data.uid.size() > 0 && data.uid.size() < 128 &&
              data.email is string && data.email.size() < 256 && isValidEmail(data.email) &&
              (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 100)) &&
              (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() < 2048)) &&
-             (!('lastLogin' in data) || data.lastLogin is string) &&
-             (!('role' in data) || (data.role is string && data.role in ['admin', 'user']));
+             (!('lastLogin' in data) || data.lastLogin is timestamp) &&
+             (!('role' in data) || (data.role is string && data.role in ['admin', 'user'])) &&
+             (!('cash' in data) || (data.cash is number && data.cash >= 0)) &&
+             (!('telegramBotToken' in data) || (data.telegramBotToken is string && data.telegramBotToken.size() < 200)) &&
+             (!('telegramChatId' in data) || (data.telegramChatId is string && data.telegramChatId.size() < 50));
     }
 
     function isValidStock(data) {
@@ -89,8 +92,7 @@ service cloud.firestore {
       }
 
       match /snapshots/{snapshotId} {
-        allow read: if isOwner(userId) || isAdmin();
-        allow write: if false;
+        allow read, write: if isOwner(userId) || isAdmin();
       }
     }
 

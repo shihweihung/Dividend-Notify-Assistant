@@ -30,8 +30,8 @@ export type StockEntry = {
   symbol: string;
   name: string;
   shares: number;
+  cost?: number; // Average purchase price per share
   dividendInfo?: DividendInfo;
-  manualDividendAdjustment?: number | null;
 }
 
 export type CalendarEvent = {

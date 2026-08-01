@@ -1,6 +1,6 @@
 import axios from 'axios';
 import type { DividendInfo } from "../types";
-import { fetchStockDataFromTwse } from "./twseService.ts";
+import { fetchStockDataFromTwse } from "./twseService";
 
 /**
  * 核心抓取邏輯：完全移除 Google AI 依賴，改用純 API 模式
@@ -20,9 +20,9 @@ export async function fetchDividendData(symbol: string): Promise<DividendInfo | 
 
   // 2. 如果是 ETF，從 MoneyDJ 抓成分股
   if (isEtf) {
+    const etfUrl = `https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid=${twseData.symbol}.TW`;
     try {
       console.log(`[MoneyDJ] 正在抓取 ${twseData.symbol} 的成分股...`);
-      const etfUrl = `https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid=${twseData.symbol}.TW`;
       const etfRes = await axios.get(etfUrl, { timeout: 10000 });
       
       const cheerio = await import('cheerio');
@@ -49,7 +49,7 @@ export async function fetchDividendData(symbol: string): Promise<DividendInfo | 
         }
       });
     } catch (error) {
-      console.warn("[MoneyDJ] 取得成分股失敗，跳過此步驟:", error instanceof Error ? error.message : error);
+      console.error("[MoneyDJ] 取得成分股失敗，網址:", etfUrl, "錯誤:", error instanceof Error ? error.message : error);
     }
   }
 
