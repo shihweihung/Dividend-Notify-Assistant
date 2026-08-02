@@ -43,7 +43,7 @@ async function startServer() {
   if (fs.existsSync(fbConfigPath)) {
     try {
       const firebaseConfig = JSON.parse(fs.readFileSync(fbConfigPath, "utf-8"));
-      const firebaseApp = admin.initializeApp({
+      const firebaseApp = admin.apps.length > 0 ? admin.apps[0]! : admin.initializeApp({
         projectId: firebaseConfig.projectId,
       });
       adminDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
@@ -799,26 +799,61 @@ async function startServer() {
 
       const stocksList = stocks || [];
       const isTruncated = stocksList.length > 20;
+
+      let totalStockValue = 0;
+      let totalStockCost = 0;
+      let hasAnyCost = false;
+
       const stocksSummary = stocksList.length > 0
         ? stocksList.slice(0, 20).map((s: any) => {
             const name = s.name || s.symbol;
-            const shares = s.shares || 0;
-            const divInfo = s.dividendInfo;
-            let extra = "";
-            if (divInfo) {
-              if (divInfo.currentPrice) {
-                extra += `, 現價: ${divInfo.currentPrice}元`;
-              }
-              if (divInfo.yield) {
-                extra += `, 殖利率: ${Number(divInfo.yield).toFixed(2)}%`;
+            const shares = Number(s.shares) || 0;
+            const cost = s.cost !== undefined && s.cost !== null && Number(s.cost) > 0 ? Number(s.cost) : null;
+            const currentPrice = Number(s.dividendInfo?.currentPrice || s.currentPrice || 0);
+            const yieldRate = Number(s.dividendInfo?.yield || 0);
+
+            const currentValue = currentPrice * shares;
+            totalStockValue += currentValue;
+
+            let costText = "成本單價: 未設定";
+            let profitText = "";
+
+            if (cost !== null) {
+              hasAnyCost = true;
+              const totalCost = cost * shares;
+              totalStockCost += totalCost;
+              costText = `成本單價: $${cost}元 (總成本: $${Math.round(totalCost).toLocaleString()}元)`;
+
+              if (currentPrice > 0 && shares > 0) {
+                const profit = currentValue - totalCost;
+                const profitRate = totalCost > 0 ? ((profit / totalCost) * 100).toFixed(2) : '0.00';
+                profitText = `, 未實現損益: ${profit >= 0 ? '+' : ''}$${Math.round(profit).toLocaleString()}元 (${profitRate}%)`;
               }
             }
-            return `- ${name} (${s.symbol}): ${shares} 股${extra}`;
+
+            let extra = "";
+            if (currentPrice > 0) {
+              extra += `, 現價: $${currentPrice}元, 現值市值: $${Math.round(currentValue).toLocaleString()}元`;
+            }
+            if (yieldRate > 0) {
+              extra += `, 殖利率: ${yieldRate.toFixed(2)}%`;
+            }
+
+            return `- ${name} (${s.symbol}): ${shares.toLocaleString()} 股, ${costText}${extra}${profitText}`;
           }).join("\n") + (isTruncated ? "\n... (省略其餘持股)" : "")
         : "目前持股列表中尚無持股數據（若您剛加入，可返回網頁重新加載以觸發最新的同步）。";
 
+      const totalUnrealizedProfit = totalStockValue - totalStockCost;
+      const totalProfitRate = totalStockCost > 0 ? ((totalUnrealizedProfit / totalStockCost) * 100).toFixed(2) : '0.00';
+      const totalAssets = totalStockValue + cash;
+
+      const profitSummaryText = hasAnyCost
+        ? `💰 總股票成本：$${Math.round(totalStockCost).toLocaleString()} 元 | 未實現總損益：${totalUnrealizedProfit >= 0 ? '+' : ''}$${Math.round(totalUnrealizedProfit).toLocaleString()} 元 (${totalProfitRate}%)\n`
+        : `💰 總股票成本：目前尚未設定成本單價 (若使用者詢問損益，請提示可在「息引力」網頁補填各股票的「成本單價」以獲得自動計算)\n`;
+
       const backgroundSection = `## 當前個人資產背景\n` +
-        `📊 帳戶：${finalUsername} | 現金：${cash.toLocaleString()} 元\n` +
+        `📊 帳戶：${finalUsername} | 現金：$${cash.toLocaleString()} 元 | 股票總市值：$${Math.round(totalStockValue).toLocaleString()} 元 | 總資產：$${Math.round(totalAssets).toLocaleString()} 元\n` +
+        profitSummaryText +
         `持股明細：\n` +
         `${stocksSummary}\n\n`;
 
@@ -836,7 +871,7 @@ async function startServer() {
         `限制 3 段落內,約 150-200 字。內容:\n` +
         `1. 總資產快照:市值 + 現金 + 現金比重百分比\n` +
         `2. 前三大部位是哪些股票、佔比多少,是否有集中風險\n` +
-        `3. 近 30 定內的除息事件或關鍵行事曆(若有)\n\n` +
+        `3. 近 30 天內的除息事件或關鍵行事曆(若有)\n\n` +
         `### 模式 B:組合層級的策略提問(關鍵字:配置、平衡、加碼、減碼、部位、輪動、風險)\n` +
         `300-500 字,分段回答:\n` +
         `1. 現況診斷:目前組合的產業曝險、股息集中度、現金水位是否合理\n` +
@@ -858,6 +893,11 @@ async function startServer() {
         `- 除息日期、預估配息金額\n` +
         `- 產業層級的關鍵事件(新品發表、大廠 capex、政策)\n\n` +
         `結論用 1 句話:結合本人現有部位,建議該加碼/續抱/減碼/觀望,理由一句話。\n\n` +
+        `### 模式 D:獲利與損益查詢(關鍵字:獲利、損益、賺多少、賠多少、報酬率、利潤、賺或賠)\n` +
+        `限制 3 段落內,約 150-250 字。內容:\n` +
+        `1. 總獲利快照:回報總投資成本、股票總市值與未實現總損益（包含金額與報酬率 %）。\n` +
+        `2. 個股表現分析:列出獲利最高與需注意（虧損或獲利較低）的持股部位與金額/報酬率。\n` +
+        `3. 若有部分或全部股票未設定成本單價，提醒使用者可返回「息引力」網頁的各股票欄位中填寫「成本單價」，系統便能自動為您精算完整即時獲利損益。\n\n` +
         `## 資料來源與誠實原則\n` +
         `- 若不確定的財務數字,直接說「這個數字我沒把握,建議查證」,絕對不編造\n` +
         `- 產業鏈與競品關係可用你的知識回答,但明確年份可以說「以近期公開資訊」\n` +
@@ -1190,4 +1230,6 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("Fatal error starting server:", err);
+});
