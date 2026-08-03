@@ -1074,14 +1074,28 @@ async function startServer() {
 
   // Background Telegram Polling System (Bulletproof strategy for authenticated environments / local testing)
   const botOffsets: Record<string, number> = {};
+  const invalidBotTokens = new Set<string>();
 
   async function pollBotUpdates(botToken: string) {
+    if (invalidBotTokens.has(botToken)) return;
     try {
       const offset = botOffsets[botToken] || 0;
       const url = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${offset}&timeout=1`;
       const response = await fetch(url);
+      if (response.status === 401) {
+        invalidBotTokens.add(botToken);
+        console.log(`[Telegram Bot] Bot token ${botToken.substring(0, 10)}... is invalid or revoked (401). Polling disabled for this token.`);
+        return;
+      }
       if (!response.ok) return;
       const data: any = await response.json();
+      if (data.error_code === 401 || data.ok === false) {
+        if (data.error_code === 401) {
+          invalidBotTokens.add(botToken);
+          console.log(`[Telegram Bot] Bot token ${botToken.substring(0, 10)}... is invalid or revoked (401). Polling disabled for this token.`);
+        }
+        return;
+      }
       if (data.ok && data.result && data.result.length > 0) {
         for (const update of data.result) {
           botOffsets[botToken] = update.update_id + 1;
@@ -1099,7 +1113,7 @@ async function startServer() {
   async function getActivePollingBotTokens(): Promise<string[]> {
     const defaultBotToken = process.env.TELEGRAM_BOT_TOKEN;
     if (firestoreAvailable === false) {
-      return [defaultBotToken].filter(Boolean) as string[];
+      return [defaultBotToken].filter((t) => Boolean(t) && !invalidBotTokens.has(t!)) as string[];
     }
 
     const tokens = new Set<string>();
@@ -1110,7 +1124,7 @@ async function startServer() {
       const snapshot = await adminDb.collection("telegram_chats").get();
       snapshot.docs.forEach((doc: any) => {
         const chat = doc.data();
-        if (chat.botToken) {
+        if (chat.botToken && !invalidBotTokens.has(chat.botToken)) {
           if (chat.isWebhookMode) {
             if (chat.botToken === defaultBotToken) {
               defaultIsWebhook = true;
@@ -1131,7 +1145,7 @@ async function startServer() {
       }
     }
 
-    if (defaultBotToken && !defaultIsWebhook) {
+    if (defaultBotToken && !defaultIsWebhook && !invalidBotTokens.has(defaultBotToken)) {
       tokens.add(defaultBotToken);
     }
 
@@ -1156,12 +1170,13 @@ async function startServer() {
         if (delData.ok) {
           console.log(`🤖 [Telegram Bot] Webhook removal result on boot:`, delData);
         } else if (delData.error_code === 401) {
-          console.warn(`🤖 [Telegram Bot] Webhook removal failed for bot (Unauthorized/Invalid Token)`);
+          invalidBotTokens.add(token);
+          console.log(`🤖 [Telegram Bot] Bot token ${token.substring(0, 10)}... is invalid or revoked (401). Webhook removal skipped.`);
         } else {
           console.log(`🤖 [Telegram Bot] Webhook removal result on boot:`, delData);
         }
       } catch (err) {
-        console.error(`🤖 [Telegram Bot] Webhook removal error for bot ${token.substring(0, 10)}:`, err);
+        console.log(`🤖 [Telegram Bot] Webhook removal info for bot ${token.substring(0, 10)}:`, err);
       }
     }
 
@@ -1181,7 +1196,7 @@ async function startServer() {
 
   // API: Fetch Dividend Data via Gemini
   app.get("/api/dividend/:symbol", firebaseAuth, async (req, res) => {
-    const { symbol } = req.params;
+    const symbol = (req.params.symbol || "").trim().toUpperCase();
     const apiKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
     
     if (!apiKey) {

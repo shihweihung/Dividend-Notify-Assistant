@@ -489,13 +489,14 @@ function MainApp() {
 
   const handleAddStock = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newSymbol) return;
+    const targetSymbol = newSymbol.trim().toUpperCase();
+    if (!targetSymbol) return;
 
     setIsLoading(true);
     setError(null);
     try {
       let info: DividendInfo | null = null;
-      const cacheRef = doc(db, 'market_data', newSymbol);
+      const cacheRef = doc(db, 'market_data', targetSymbol);
       
       // Check cache first
       try {
@@ -510,11 +511,11 @@ function MainApp() {
           }
         }
       } catch (e) {
-        handleFirestoreError(e, OperationType.GET, `market_data/${newSymbol}`);
+        handleFirestoreError(e, OperationType.GET, `market_data/${targetSymbol}`);
       }
 
       if (!info) {
-        const response = await authenticatedFetch(`/api/dividend/${newSymbol}`);
+        const response = await authenticatedFetch(`/api/dividend/${encodeURIComponent(targetSymbol)}`);
         if (!response.ok) {
           const errData = await response.json();
           throw new Error(errData.error || '查詢失敗');
@@ -528,7 +529,7 @@ function MainApp() {
               updatedAt: serverTimestamp()
             });
           } catch (e) {
-            handleFirestoreError(e, OperationType.WRITE, `market_data/${newSymbol}`);
+            handleFirestoreError(e, OperationType.WRITE, `market_data/${targetSymbol}`);
           }
         }
       }
@@ -538,17 +539,24 @@ function MainApp() {
           symbol: info.symbol, 
           name: info.name, 
           shares: newShares || 0, 
-          cost: newCost > 0 ? newCost : undefined,
+          ...(newCost > 0 ? { cost: newCost } : {}),
           dividendInfo: info
         };
 
         if (user) {
           const stockRef = doc(db, 'users', user.uid, 'stocks', info.symbol);
           try {
-            await setDoc(stockRef, {
-              ...stockData,
+            const firestorePayload: any = {
+              symbol: info.symbol,
+              name: info.name,
+              shares: newShares || 0,
+              dividendInfo: info,
               updatedAt: serverTimestamp()
-            });
+            };
+            if (newCost > 0) {
+              firestorePayload.cost = newCost;
+            }
+            await setDoc(stockRef, firestorePayload);
           } catch (e) {
             handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/stocks/${info.symbol}`);
             throw e; // Re-throw to be caught by the outer catch block

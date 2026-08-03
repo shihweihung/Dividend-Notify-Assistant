@@ -6,7 +6,7 @@ import { fetchStockDataFromTwse } from "./twseService";
  * 核心抓取邏輯：完全移除 Google AI 依賴，改用純 API 模式
  */
 export async function fetchDividendData(symbol: string): Promise<DividendInfo | null> {
-  const cleanSymbol = symbol.trim();
+  const cleanSymbol = symbol.trim().toUpperCase();
   
   // 1. 直接從官方 API 取得基礎資料 (股價、除息日)
   const twseData = await fetchStockDataFromTwse(cleanSymbol);

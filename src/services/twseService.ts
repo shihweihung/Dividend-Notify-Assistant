@@ -57,8 +57,9 @@ export interface TwseData {
  */
 async function fetchDividendListFromYahoo(symbol: string, isOtc: boolean): Promise<{ date: string, amount: number, year: number, paymentDate: string }[]> {
   try {
+    const cleanSymbol = symbol.trim().toUpperCase();
     const suffix = isOtc ? ".TWO" : ".TW";
-    const url = `https://tw.stock.yahoo.com/quote/${symbol}${suffix}/dividend`;
+    const url = `https://tw.stock.yahoo.com/quote/${cleanSymbol}${suffix}/dividend`;
     console.log(`[Yahoo History] 正在抓取除權息歷史: ${url}`);
     
     const res = await axios.get(url, {
@@ -112,7 +113,8 @@ async function fetchDividendListFromYahoo(symbol: string, isOtc: boolean): Promi
 
 export async function fetchDividendFromHiStock(symbol: string): Promise<any[]> {
   try {
-    const url = `https://histock.tw/stock/${symbol}/%E9%99%A4%E6%AC%8A%E9%99%A4%E6%81%AF`;
+    const cleanSymbol = symbol.trim().toUpperCase();
+    const url = `https://histock.tw/stock/${cleanSymbol}/%E9%99%A4%E6%AC%8A%E9%99%A4%E6%81%AF`;
     const res = await axios.get(url, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeout: 10000
@@ -176,11 +178,12 @@ export async function fetchDividendFromHiStock(symbol: string): Promise<any[]> {
  * 從 Yahoo 股市抓取即時股價
  */
 export async function fetchPriceFromYahoo(symbol: string): Promise<{ price: number, name: string } | null> {
+  const cleanSymbol = symbol.trim().toUpperCase();
   const suffixes = ['.TW', '.TWO'];
   
   for (const suffix of suffixes) {
     try {
-      const url = `https://tw.stock.yahoo.com/quote/${symbol}${suffix}`;
+      const url = `https://tw.stock.yahoo.com/quote/${cleanSymbol}${suffix}`;
       const res = await axios.get(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -232,7 +235,7 @@ export async function fetchPriceFromYahoo(symbol: string): Promise<{ price: numb
 
 export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData | null> {
   try {
-    const cleanSymbol = symbol.trim();
+    const cleanSymbol = symbol.trim().toUpperCase();
     const today = getTaipeiToday();
     
     // 1. 抓取股價並確認上市/上櫃
@@ -248,14 +251,14 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
       const priceResTwse = await axios.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", { timeout: 10000 });
       if (Array.isArray(priceResTwse.data)) {
         priceTarget = priceResTwse.data.find((item: any) => 
-          item.Code === cleanSymbol || 
+          item.Code?.toUpperCase() === cleanSymbol || 
           item.Name === cleanSymbol || 
-          (cleanSymbol.length >= 2 && item.Name.startsWith(cleanSymbol))
+          (cleanSymbol.length >= 2 && item.Name?.startsWith(cleanSymbol))
         );
         if (priceTarget) {
           currentPrice = parseFloat(priceTarget.ClosingPrice) || 0;
           stockName = priceTarget.Name;
-          finalSymbol = priceTarget.Code;
+          finalSymbol = priceTarget.Code?.toUpperCase() || cleanSymbol;
           isOtc = false;
         }
       }
@@ -266,14 +269,14 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
         const priceResTpex = await axios.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", { timeout: 10000 });
         if (Array.isArray(priceResTpex.data)) {
           priceTarget = priceResTpex.data.find((item: any) => 
-            item.SecuritiesCompanyCode === cleanSymbol || 
+            item.SecuritiesCompanyCode?.toUpperCase() === cleanSymbol || 
             item.CompanyName === cleanSymbol ||
-            (cleanSymbol.length >= 2 && item.CompanyName.startsWith(cleanSymbol))
+            (cleanSymbol.length >= 2 && item.CompanyName?.startsWith(cleanSymbol))
           );
           if (priceTarget) {
             currentPrice = parseFloat(priceTarget.Close) || 0;
             stockName = priceTarget.CompanyName;
-            finalSymbol = priceTarget.SecuritiesCompanyCode;
+            finalSymbol = priceTarget.SecuritiesCompanyCode?.toUpperCase() || cleanSymbol;
             isOtc = true;
           }
         }
@@ -285,13 +288,13 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
         const priceResTpexBond = await axios.get("https://www.tpex.org.tw/openapi/v1/tpex_bond_etf_quotes", { timeout: 10000 });
         if (Array.isArray(priceResTpexBond.data)) {
           priceTarget = priceResTpexBond.data.find((item: any) => 
-            item.SecuritiesCompanyCode === cleanSymbol || 
+            item.SecuritiesCompanyCode?.toUpperCase() === cleanSymbol || 
             item.CompanyName === cleanSymbol
           );
           if (priceTarget) {
             currentPrice = parseFloat(priceTarget.ClosePrice) || 0;
             stockName = priceTarget.CompanyName;
-            finalSymbol = priceTarget.SecuritiesCompanyCode;
+            finalSymbol = priceTarget.SecuritiesCompanyCode?.toUpperCase() || cleanSymbol;
             isOtc = true;
           }
         }
