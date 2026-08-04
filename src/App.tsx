@@ -234,7 +234,7 @@ function MainApp() {
     return currentShares;
   }, [snapshots]);
 
-  // Notification Helpers
+  // Notification Helpers (【備註】已由後端 Telegram 推播取代，此為輔助功能)
   const requestNotificationPermission = async () => {
     if (typeof Notification === 'undefined') return;
     try {
@@ -998,7 +998,7 @@ function MainApp() {
     return events;
   }, [stocks, getSharesOnExDate]);
 
-  // Schedule Today's Notifications
+  // Schedule Today's Notifications (【備註】已由後端 Telegram 推播取代，此為輔助功能)
   useEffect(() => {
     if (!notificationsEnabled || notificationPermission !== 'granted' || stocks.length === 0) return;
 
@@ -1763,49 +1763,6 @@ function MainApp() {
                                   "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
                                   darkMode ? "right-0.5" : "left-0.5"
                                 )} />
-                              </div>
-                            </button>
-
-                            {/* Notification Toggle */}
-                            <button
-                              onClick={async () => {
-                                if (!notificationsEnabled) {
-                                  await requestNotificationPermission();
-                                  setNotificationsEnabled(true);
-                                } else {
-                                  setNotificationsEnabled(false);
-                                }
-                              }}
-                              className={cn(
-                                "w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer select-none",
-                                darkMode ? "hover:bg-slate-800 text-slate-300" : "hover:bg-slate-50 text-slate-600"
-                              )}
-                            >
-                              <div className="flex items-center gap-2">
-                                <BellRing className={cn("w-4 h-4", notificationsEnabled ? "text-emerald-500 animate-pulse" : "text-slate-400")} />
-                                <span>除息領息通知</span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                {notificationsEnabled && (
-                                  <span 
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      testNotification();
-                                    }}
-                                    className="text-[10px] text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 font-bold underline px-1.5 cursor-pointer hover:opacity-80"
-                                  >
-                                    測試
-                                  </span>
-                                )}
-                                <div className={cn(
-                                  "w-8 h-4 rounded-full relative transition-colors",
-                                  notificationsEnabled ? "bg-indigo-600" : "bg-slate-300"
-                                )}>
-                                  <div className={cn(
-                                    "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
-                                    notificationsEnabled ? "right-0.5" : "left-0.5"
-                                  )} />
-                                </div>
                               </div>
                             </button>
 
