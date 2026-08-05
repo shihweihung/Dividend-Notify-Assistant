@@ -9,6 +9,8 @@
         "name": { "type": "string", "description": "The name of the company" },
         "shares": { "type": "number", "description": "Number of shares held" },
         "cost": { "type": "number", "description": "Purchase cost per share" },
+        "sellPrice": { "type": "number", "description": "Selling price per share for realized profit calculation" },
+        "soldShares": { "type": "number", "description": "Number of shares sold" },
         "currentPrice": { "type": "number", "description": "Current market price of stock" },
         "priceUpdatedAt": { "type": "string", "description": "Timestamp when price was updated" },
         "dividendInfo": {

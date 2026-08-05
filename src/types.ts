@@ -31,6 +31,8 @@ export type StockEntry = {
   name: string;
   shares: number;
   cost?: number; // Average purchase price per share
+  sellPrice?: number; // Selling price per share for realized profit calculation
+  soldShares?: number; // Shares sold when cleared
   dividendInfo?: DividendInfo;
 }
 

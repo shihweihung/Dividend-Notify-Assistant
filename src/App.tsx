@@ -24,7 +24,10 @@ import {
   BellRing,
   Send,
   Download,
-  MessageSquare
+  MessageSquare,
+  ChevronsUpDown,
+  Folder,
+  Layers
 } from 'lucide-react';
 import { 
   PieChart as RechartsPieChart, 
@@ -147,6 +150,92 @@ function MainApp() {
   const [snapshots, setSnapshots] = useState<{ date: string; stocks: any[] }[]>([]);
   const [stockToDelete, setStockToDelete] = useState<{ symbol: string; name: string } | null>(null);
   const [stockFilterTab, setStockFilterTab] = useState<'all' | 'active' | 'sold'>('all');
+  const [stockGrouping, setStockGrouping] = useState<'none' | 'type' | 'frequency'>('none');
+  const [collapsedStockCards, setCollapsedStockCards] = useState<Set<string>>(new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const toggleStockCardCollapse = useCallback((symbol: string) => {
+    setCollapsedStockCards(prev => {
+      const next = new Set(prev);
+      if (next.has(symbol)) {
+        next.delete(symbol);
+      } else {
+        next.add(symbol);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleGroupCollapse = useCallback((groupKey: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) {
+        next.delete(groupKey);
+      } else {
+        next.add(groupKey);
+      }
+      return next;
+    });
+  }, []);
+
+  const filteredStocks = useMemo(() => {
+    return stocks.filter(stock => {
+      if (stockFilterTab === 'active') return stock.shares > 0;
+      if (stockFilterTab === 'sold') return stock.shares === 0;
+      return true;
+    });
+  }, [stocks, stockFilterTab]);
+
+  const handleToggleAllCardsCollapse = useCallback(() => {
+    setCollapsedStockCards(prev => {
+      if (prev.size >= filteredStocks.length && filteredStocks.length > 0) {
+        return new Set();
+      } else {
+        return new Set(filteredStocks.map(s => s.symbol));
+      }
+    });
+  }, [filteredStocks]);
+
+  const groupedStockList = useMemo(() => {
+    if (stockGrouping === 'none') {
+      return [{ key: 'all', title: '', stocks: filteredStocks }];
+    }
+
+    if (stockGrouping === 'type') {
+      const etfs = filteredStocks.filter(s => s.dividendInfo?.isEtf);
+      const individual = filteredStocks.filter(s => !s.dividendInfo?.isEtf);
+      const groups = [];
+      if (etfs.length > 0) groups.push({ key: 'etf', title: 'ETF 基金', stocks: etfs });
+      if (individual.length > 0) groups.push({ key: 'individual', title: '個股股票', stocks: individual });
+      return groups;
+    }
+
+    if (stockGrouping === 'frequency') {
+      const monthly: StockEntry[] = [];
+      const quarterly: StockEntry[] = [];
+      const others: StockEntry[] = [];
+
+      filteredStocks.forEach(s => {
+        const frequency = s.dividendInfo?.frequency || '';
+        const divCount = s.dividendInfo?.dividendHistory?.length || 0;
+        if (frequency.includes('月') || divCount >= 10) {
+          monthly.push(s);
+        } else if (frequency.includes('季') || (divCount >= 3 && divCount <= 6)) {
+          quarterly.push(s);
+        } else {
+          others.push(s);
+        }
+      });
+
+      const groups = [];
+      if (monthly.length > 0) groups.push({ key: 'monthly', title: '月配息', stocks: monthly });
+      if (quarterly.length > 0) groups.push({ key: 'quarterly', title: '季配息', stocks: quarterly });
+      if (others.length > 0) groups.push({ key: 'others', title: '其他 / 半年配 / 年配', stocks: others });
+      return groups;
+    }
+
+    return [{ key: 'all', title: '', stocks: filteredStocks }];
+  }, [filteredStocks, stockGrouping]);
 
   // Load historical snapshots for accurate ex-dividend date share calculation
   useEffect(() => {
@@ -608,28 +697,57 @@ function MainApp() {
   };
 
   const handleUpdateShares = async (symbol: string, shares: number) => {
+    const currentStock = stocks.find(s => s.symbol === symbol);
+    const updateObj: { shares: number; soldShares?: number } = { shares };
+    if (shares === 0 && currentStock && currentStock.shares > 0) {
+      if (!currentStock.soldShares) {
+        updateObj.soldShares = currentStock.shares;
+      }
+    }
+    setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, ...updateObj } : s));
     if (user) {
       const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
       try {
-        await updateDoc(stockRef, { shares });
+        await setDoc(stockRef, updateObj, { merge: true });
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${symbol}`);
       }
-    } else {
-      setStocks(stocks.map(s => s.symbol === symbol ? { ...s, shares } : s));
     }
   };
 
   const handleUpdateCost = async (symbol: string, cost: number) => {
+    setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, cost } : s));
     if (user) {
       const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
       try {
-        await updateDoc(stockRef, { cost });
+        await setDoc(stockRef, { cost }, { merge: true });
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${symbol}`);
       }
-    } else {
-      setStocks(stocks.map(s => s.symbol === symbol ? { ...s, cost } : s));
+    }
+  };
+
+  const handleUpdateSellPrice = async (symbol: string, sellPrice: number) => {
+    setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, sellPrice } : s));
+    if (user) {
+      const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
+      try {
+        await setDoc(stockRef, { sellPrice }, { merge: true });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${symbol}`);
+      }
+    }
+  };
+
+  const handleUpdateSoldShares = async (symbol: string, soldShares: number) => {
+    setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, soldShares } : s));
+    if (user) {
+      const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
+      try {
+        await setDoc(stockRef, { soldShares }, { merge: true });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${symbol}`);
+      }
     }
   };
 
@@ -1321,23 +1439,40 @@ function MainApp() {
   const portfolioData = useMemo(() => {
     let totalValue = 0;
     let totalCost = 0;
+    let totalMarketValueOfCostedStocks = 0;
     const allocation: Record<string, number> = {};
 
+    let totalRealizedProfit = 0;
+    let totalSoldCost = 0;
+
     stocks.forEach(stock => {
-      if (stock.dividendInfo && stock.shares > 0) {
-        const currentPrice = stock.dividendInfo.currentPrice || 0;
-        const marketValue = currentPrice * stock.shares;
+      const currentPrice = stock.dividendInfo?.currentPrice || 0;
+      const shares = stock.shares || 0;
+      const marketValue = currentPrice * shares;
+
+      if (shares > 0) {
         totalValue += marketValue;
-        
         allocation[stock.name] = (allocation[stock.name] || 0) + marketValue;
-      }
-      if (stock.cost && stock.cost > 0 && stock.shares > 0) {
-        totalCost += stock.cost * stock.shares;
+
+        if (stock.cost && stock.cost > 0) {
+          totalCost += stock.cost * shares;
+          totalMarketValueOfCostedStocks += marketValue;
+        }
+      } else {
+        const cost = stock.cost || 0;
+        const sellPrice = stock.sellPrice || 0;
+        const soldShares = stock.soldShares || 1000;
+        if (cost > 0 && sellPrice > 0) {
+          const profit = (sellPrice - cost) * soldShares;
+          totalRealizedProfit += profit;
+          totalSoldCost += cost * soldShares;
+        }
       }
     });
 
-    const totalUnrealizedProfit = totalCost > 0 ? (totalValue - totalCost) : 0;
+    const totalUnrealizedProfit = totalCost > 0 ? (totalMarketValueOfCostedStocks - totalCost) : 0;
     const totalReturnRate = totalCost > 0 ? (totalUnrealizedProfit / totalCost) * 100 : 0;
+    const totalRealizedReturnRate = totalSoldCost > 0 ? (totalRealizedProfit / totalSoldCost) * 100 : 0;
 
     const rawAllocationData = [...stocks.map(stock => {
       const marketValue = (stock.dividendInfo?.currentPrice || 0) * stock.shares;
@@ -1370,7 +1505,7 @@ function MainApp() {
       ? rawAllocationData.reduce((sum, item) => sum + (item.yield * item.value), 0) / totalValue
       : 0;
 
-    return { totalValue, totalCost, totalUnrealizedProfit, totalReturnRate, allocationData, totalWeightedYield };
+    return { totalValue, totalCost, totalUnrealizedProfit, totalReturnRate, allocationData, totalWeightedYield, totalRealizedProfit, totalSoldCost, totalRealizedReturnRate };
   }, [stocks, componentLimit]);
 
   const handleUpdateTelegramSettings = async (token: string, chatId: string) => {
@@ -1927,216 +2062,6 @@ function MainApp() {
         </header>
 
       <main className="max-w-4xl mx-auto px-4 py-4 space-y-4">
-        {/* Dividend Distribution Dashboard - Now Full Width */}
-        <div className={cn(
-          "p-4 rounded-2xl shadow-sm border transition-colors flex flex-col",
-          darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
-        )}>
-          <div className="flex justify-between items-center mb-2 shrink-0 gap-2">
-            <button 
-              onClick={() => setIsOverviewExpanded(!isOverviewExpanded)}
-              className="flex-1 flex flex-col text-left group"
-            >
-              <div className="flex items-center gap-2">
-                <h2 className={cn("text-sm font-black flex items-center gap-1.5", darkMode ? "text-slate-100" : "text-slate-900")}>
-                  <span>{selectedYear} 股息概況</span>
-                </h2>
-                <div className={cn(
-                  "p-0.5 rounded-md transition-colors",
-                  darkMode ? "text-slate-400 group-hover:bg-slate-700" : "text-slate-400 group-hover:bg-slate-150"
-                )}>
-                  {isOverviewExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                </div>
-              </div>
-              <p className="text-[10px] text-slate-500 font-bold">點擊{isOverviewExpanded ? '收合' : '展開'}詳細分析</p>
-            </button>
-            
-            {/* Localized Year Selector */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              <span className={cn("text-[10px] font-bold opacity-60", darkMode ? "text-slate-400" : "text-slate-500")}>分析年度:</span>
-              <select
-                value={selectedYear}
-                onChange={(e) => setSelectedYear(Number(e.target.value))}
-                className={cn(
-                  "text-[10px] font-black px-2 py-1 rounded-lg border focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-sm select-none",
-                  darkMode ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700"
-                )}
-              >
-                {[2026, 2027, 2028, 2029, 2030].map(yr => (
-                  <option key={yr} value={yr}>{yr} 年</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          
-          <AnimatePresence>
-            {isOverviewExpanded && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: 'auto', opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                className="overflow-hidden"
-              >
-                <div className="flex flex-col md:flex-row gap-4 items-center pt-2">
-                  {/* Pie Chart with Top 1 Focus */}
-                  <div className="h-64 flex flex-col w-full md:w-1/2 relative">
-              <ResponsiveContainer width="100%" height="100%">
-                <RechartsPieChart margin={{ top: 5, right: 5, left: 5, bottom: 5 }}>
-                  <Pie
-                    data={dividendStats.distributionData}
-                    dataKey="value"
-                    nameKey="name"
-                    cx="50%"
-                    cy="50%"
-                    innerRadius="60%"
-                    outerRadius="80%"
-                    paddingAngle={2}
-                    label={false}
-                  >
-                    {dividendStats.distributionData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle" className={cn("text-[10px] font-bold", darkMode ? "fill-slate-400" : "fill-slate-600")}>
-                    <tspan x="50%" dy="-0.5em">預計總額</tspan>
-                    <tspan x="50%" dy="1.2em" className={cn("text-[14px] font-black", darkMode ? "fill-slate-100" : "fill-slate-900")}>
-                      ${dividendStats.total.toLocaleString()}
-                    </tspan>
-                  </text>
-                  <RechartsTooltip 
-                    formatter={(value: number, name: string) => [`$${value.toLocaleString()}`, name]}
-                    contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', fontSize: '10px' }}
-                  />
-                </RechartsPieChart>
-              </ResponsiveContainer>
-            </div>
-            
-            {/* Legend as List View - Moved to the right */}
-            <div className="w-full md:w-1/2 space-y-1.5 overflow-y-auto max-h-[160px] pr-2 custom-scrollbar">
-              {dividendStats.distributionData.map((entry, index) => (
-                <div key={entry.name} className="flex items-center justify-between text-[10px] py-0.5 border-b border-slate-100 dark:border-slate-800/50 last:border-0">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
-                    <span className={cn("font-bold truncate", darkMode ? "text-slate-300" : "text-slate-700")}>{entry.name}</span>
-                  </div>
-                  <span className={cn("font-mono font-bold shrink-0 ml-2", darkMode ? "text-slate-100" : "text-slate-900")}>${entry.value.toLocaleString()}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-            {/* Monthly Bar Chart */}
-            <div className={cn("pt-6 flex flex-col h-64 w-full border-t mt-4", darkMode ? "border-slate-700" : "border-slate-100")}>
-              <h3 className={cn("text-[9px] sm:text-[10px] font-bold mb-1 uppercase tracking-wider shrink-0", darkMode ? "text-slate-500" : "text-slate-400")}>每月股息</h3>
-              <div className="flex-1 min-h-0 relative">
-                {dividendStats.monthlyData.some(d => d.amount > 0 || d.pendingAmount > 0) ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={dividendStats.monthlyData} margin={{ top: 15, right: 10, left: -10, bottom: 0 }}>
-                      <XAxis 
-                        dataKey="month" 
-                        axisLine={false} 
-                        tickLine={false} 
-                        interval={0}
-                        tick={(props) => {
-                          const { x, y, payload } = props;
-                          const monthNum = parseInt(payload.value);
-                          const isCurrentMonth = monthNum === (new Date().getMonth() + 1);
-                          return (
-                            <text 
-                              x={x} 
-                              y={y} 
-                              dy={10} 
-                              textAnchor="middle" 
-                              fontSize={9} 
-                              fontWeight={isCurrentMonth ? 900 : 700} 
-                              fill={isCurrentMonth ? "#10b981" : (darkMode ? "#94a3b8" : "#64748b")}
-                            >
-                              {payload.value}
-                            </text>
-                          );
-                        }}
-                      />
-                      <YAxis 
-                        hide={false} 
-                        tick={{ fontSize: 8, fill: darkMode ? '#94a3b8' : '#64748b' }}
-                        axisLine={false}
-                        tickLine={false}
-                        width={30}
-                        tickFormatter={(value) => value >= 1000 ? `${(value/1000).toFixed(0)}k` : value}
-                      />
-                      <RechartsTooltip 
-                        cursor={{ fill: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.02)' }}
-                        content={({ active, payload }) => {
-                          if (active && payload && payload.length) {
-                            const data = payload[0].payload;
-                            return (
-                              <div className={cn(
-                                "px-3 py-2 rounded-xl shadow-xl border text-[10px] font-bold z-50",
-                                darkMode ? "bg-slate-900 border-slate-800 text-slate-200" : "bg-white border-slate-100 text-slate-700"
-                              )}>
-                                <p className="mb-2 opacity-100 border-b pb-1 border-slate-100 dark:border-slate-800 flex justify-between">
-                                  <span>{data.month} 股息明細</span>
-                                  <span className="opacity-50 font-normal">總計: ${(data.amount + data.pendingAmount).toLocaleString()}</span>
-                                </p>
-                                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
-                                  {data.breakdown && data.breakdown.map((item: any, idx: number) => (
-                                    <div key={idx} className="flex justify-between items-center gap-4">
-                                      <div className="flex items-center gap-1.5">
-                                        <div className={cn(
-                                          "w-1 h-1 rounded-full",
-                                          item.isPending ? "bg-amber-500" : "bg-emerald-500"
-                                        )} />
-                                        <span className="opacity-70">{item.symbol}</span>
-                                      </div>
-                                      <span className={cn(
-                                        "font-mono",
-                                        item.isPending ? "text-amber-500" : "text-emerald-500"
-                                      )}>+${Math.round(item.amount).toLocaleString()}</span>
-                                    </div>
-                                  ))}
-                                  {(!data.breakdown || data.breakdown.length === 0) && (
-                                    <p className="text-slate-500 py-1 font-normal italic">此月份無資料</p>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          }
-                          return null;
-                        }}
-                      />
-                      <Bar dataKey="amount" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]}>
-                        <LabelList 
-                          dataKey="amount" 
-                          position="top" 
-                          formatter={(v: number) => v > 0 ? `${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v}` : ''} 
-                          style={{ fontSize: 7, fontWeight: 800, fill: darkMode ? '#10b981' : '#059669' }} 
-                        />
-                      </Bar>
-                      <Bar dataKey="pendingAmount" stackId="a" fill="#f59e0b" radius={[2, 2, 0, 0]}>
-                        <LabelList 
-                          dataKey="pendingAmount" 
-                          position="top" 
-                          formatter={(v: number) => v > 0 ? `${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v}` : ''} 
-                          style={{ fontSize: 7, fontWeight: 800, fill: darkMode ? '#f59e0b' : '#d97706' }} 
-                        />
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                    <TrendingUp className="w-8 h-8 mb-2 opacity-20" />
-                    <p className="text-[10px] opacity-50">尚無今年股息分佈資料</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-          
-
-
         {/* Tabs - Compact */}
         <div className={cn(
           "flex p-1 rounded-xl transition-colors",
@@ -2185,6 +2110,213 @@ function MainApp() {
               animate={{ opacity: 1, y: 0 }}
               className="space-y-4"
             >
+              {/* Dividend Distribution Dashboard (庫存分布 / 股息概況) */}
+              <div className={cn(
+                "p-4 rounded-2xl shadow-sm border transition-colors flex flex-col",
+                darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
+              )}>
+                <div className="flex justify-between items-center mb-2 shrink-0 gap-2">
+                  <button 
+                    onClick={() => setIsOverviewExpanded(!isOverviewExpanded)}
+                    className="flex-1 flex flex-col text-left group"
+                  >
+                    <div className="flex items-center gap-2">
+                      <h2 className={cn("text-sm font-black flex items-center gap-1.5", darkMode ? "text-slate-100" : "text-slate-900")}>
+                        <span>{selectedYear} 股息概況與庫存分布</span>
+                      </h2>
+                      <div className={cn(
+                        "p-0.5 rounded-md transition-colors",
+                        darkMode ? "text-slate-400 group-hover:bg-slate-700" : "text-slate-400 group-hover:bg-slate-150"
+                      )}>
+                        {isOverviewExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-slate-500 font-bold">點擊{isOverviewExpanded ? '收合' : '展開'}詳細分析</p>
+                  </button>
+                  
+                  {/* Localized Year Selector */}
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className={cn("text-[10px] font-bold opacity-60", darkMode ? "text-slate-400" : "text-slate-500")}>分析年度:</span>
+                    <select
+                      value={selectedYear}
+                      onChange={(e) => setSelectedYear(Number(e.target.value))}
+                      className={cn(
+                        "text-[10px] font-black px-2 py-1 rounded-lg border focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer shadow-sm select-none",
+                        darkMode ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700"
+                      )}
+                    >
+                      {[2026, 2027, 2028, 2029, 2030].map(yr => (
+                        <option key={yr} value={yr}>{yr} 年</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                
+                <AnimatePresence>
+                  {isOverviewExpanded && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="overflow-hidden"
+                    >
+                      <div className="flex flex-col md:flex-row gap-4 items-center pt-2">
+                        {/* Pie Chart with Top 1 Focus */}
+                        <div className="h-64 flex flex-col w-full md:w-1/2 relative">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <RechartsPieChart margin={{ top: 5, right: 5, left: 5, bottom: 5 }}>
+                        <Pie
+                          data={dividendStats.distributionData}
+                          dataKey="value"
+                          nameKey="name"
+                          cx="50%"
+                          cy="50%"
+                          innerRadius="60%"
+                          outerRadius="80%"
+                          paddingAngle={2}
+                          label={false}
+                        >
+                          {dividendStats.distributionData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <text x="50%" y="50%" textAnchor="middle" dominantBaseline="middle" className={cn("text-[10px] font-bold", darkMode ? "fill-slate-400" : "fill-slate-600")}>
+                          <tspan x="50%" dy="-0.5em">預計總額</tspan>
+                          <tspan x="50%" dy="1.2em" className={cn("text-[14px] font-black", darkMode ? "fill-slate-100" : "fill-slate-900")}>
+                            ${dividendStats.total.toLocaleString()}
+                          </tspan>
+                        </text>
+                        <RechartsTooltip 
+                          formatter={(value: number, name: string) => [`$${value.toLocaleString()}`, name]}
+                          contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', fontSize: '10px' }}
+                        />
+                      </RechartsPieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  
+                  {/* Legend as List View - Moved to the right */}
+                  <div className="w-full md:w-1/2 space-y-1.5 overflow-y-auto max-h-[160px] pr-2 custom-scrollbar">
+                    {dividendStats.distributionData.map((entry, index) => (
+                      <div key={entry.name} className="flex items-center justify-between text-[10px] py-0.5 border-b border-slate-100 dark:border-slate-800/50 last:border-0">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                          <span className={cn("font-bold truncate", darkMode ? "text-slate-300" : "text-slate-700")}>{entry.name}</span>
+                        </div>
+                        <span className={cn("font-mono font-bold shrink-0 ml-2", darkMode ? "text-slate-100" : "text-slate-900")}>${entry.value.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                  {/* Monthly Bar Chart */}
+                  <div className={cn("pt-6 flex flex-col h-64 w-full border-t mt-4", darkMode ? "border-slate-700" : "border-slate-100")}>
+                    <h3 className={cn("text-[9px] sm:text-[10px] font-bold mb-1 uppercase tracking-wider shrink-0", darkMode ? "text-slate-500" : "text-slate-400")}>每月股息</h3>
+                    <div className="flex-1 min-h-0 relative">
+                      {dividendStats.monthlyData.some(d => d.amount > 0 || d.pendingAmount > 0) ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={dividendStats.monthlyData} margin={{ top: 15, right: 10, left: -10, bottom: 0 }}>
+                            <XAxis 
+                              dataKey="month" 
+                              axisLine={false} 
+                              tickLine={false} 
+                              interval={0}
+                              tick={(props) => {
+                                const { x, y, payload } = props;
+                                const monthNum = parseInt(payload.value);
+                                const isCurrentMonth = monthNum === (new Date().getMonth() + 1);
+                                return (
+                                  <text 
+                                    x={x} 
+                                    y={y} 
+                                    dy={10} 
+                                    textAnchor="middle" 
+                                    fontSize={9} 
+                                    fontWeight={isCurrentMonth ? 900 : 700} 
+                                    fill={isCurrentMonth ? "#10b981" : (darkMode ? "#94a3b8" : "#64748b")}
+                                  >
+                                    {payload.value}
+                                  </text>
+                                );
+                              }}
+                            />
+                            <YAxis 
+                              hide={false} 
+                              tick={{ fontSize: 8, fill: darkMode ? '#94a3b8' : '#64748b' }}
+                              axisLine={false}
+                              tickLine={false}
+                              width={30}
+                              tickFormatter={(value) => value >= 1000 ? `${(value/1000).toFixed(0)}k` : value}
+                            />
+                            <RechartsTooltip 
+                              cursor={{ fill: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.02)' }}
+                              content={({ active, payload }) => {
+                                if (active && payload && payload.length) {
+                                  const data = payload[0].payload;
+                                  return (
+                                    <div className={cn(
+                                      "px-3 py-2 rounded-xl shadow-xl border text-[10px] font-bold z-50",
+                                      darkMode ? "bg-slate-900 border-slate-800 text-slate-200" : "bg-white border-slate-100 text-slate-700"
+                                    )}>
+                                      <p className="mb-2 opacity-100 border-b pb-1 border-slate-100 dark:border-slate-800 flex justify-between">
+                                        <span>{data.month} 股息明細</span>
+                                        <span className="opacity-50 font-normal">總計: ${(data.amount + data.pendingAmount).toLocaleString()}</span>
+                                      </p>
+                                      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                                        {data.breakdown && data.breakdown.map((item: any, idx: number) => (
+                                          <div key={idx} className="flex justify-between items-center gap-4">
+                                            <div className="flex items-center gap-1.5">
+                                              <div className={cn(
+                                                "w-1 h-1 rounded-full",
+                                                item.isPending ? "bg-amber-500" : "bg-emerald-500"
+                                              )} />
+                                              <span className="opacity-70">{item.symbol}</span>
+                                            </div>
+                                            <span className={cn(
+                                              "font-mono",
+                                              item.isPending ? "text-amber-500" : "text-emerald-500"
+                                            )}>+${Math.round(item.amount).toLocaleString()}</span>
+                                          </div>
+                                        ))}
+                                        {(!data.breakdown || data.breakdown.length === 0) && (
+                                          <p className="text-slate-500 py-1 font-normal italic">此月份無資料</p>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                }
+                                return null;
+                              }}
+                            />
+                            <Bar dataKey="amount" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]}>
+                              <LabelList 
+                                dataKey="amount" 
+                                position="top" 
+                                formatter={(v: number) => v > 0 ? `${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v}` : ''} 
+                                style={{ fontSize: 7, fontWeight: 800, fill: darkMode ? '#10b981' : '#059669' }} 
+                              />
+                            </Bar>
+                            <Bar dataKey="pendingAmount" stackId="a" fill="#f59e0b" radius={[2, 2, 0, 0]}>
+                              <LabelList 
+                                dataKey="pendingAmount" 
+                                position="top" 
+                                formatter={(v: number) => v > 0 ? `${v >= 1000 ? (v/1000).toFixed(0) + 'k' : v}` : ''} 
+                                style={{ fontSize: 7, fontWeight: 800, fill: darkMode ? '#f59e0b' : '#d97706' }} 
+                              />
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      ) : (
+                        <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                          <TrendingUp className="w-8 h-8 mb-2 opacity-20" />
+                          <p className="text-[10px] opacity-50">尚無今年股息分佈資料</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
               {/* Calendar - More Compact */}
               <div className={cn(
                 "p-3 rounded-2xl shadow-sm border transition-colors",
@@ -2317,6 +2449,65 @@ function MainApp() {
                     </div>
                   ));
                 })()}
+              </div>
+
+              {/* Portfolio Distribution Standalone Card (庫存分布) */}
+              <div className={cn(
+                "p-4 rounded-2xl shadow-sm border transition-colors flex flex-col space-y-3",
+                darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
+              )}>
+                <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-700/60">
+                  <div className="flex items-center gap-2">
+                    <PieChart className="w-4 h-4 text-indigo-500" />
+                    <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>
+                      庫存分布 (個股市值與佔比)
+                    </h2>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className={cn("text-[10px] font-bold opacity-60", darkMode ? "text-slate-400" : "text-slate-500")}>顯示數量:</span>
+                    <select
+                      value={componentLimit}
+                      onChange={(e) => setComponentLimit(Number(e.target.value))}
+                      className={cn(
+                        "text-[10px] font-bold rounded-lg px-2 py-0.5 border cursor-pointer select-none",
+                        darkMode ? "bg-slate-700 border-slate-600 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700"
+                      )}
+                    >
+                      <option value={5}>Top 5</option>
+                      <option value={10}>Top 10</option>
+                      <option value={20}>Top 20</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-4 text-xs font-bold text-slate-500">
+                  <p>持股總現值: <span className="text-indigo-500 font-mono font-black">${portfolioData.totalValue.toLocaleString()}</span></p>
+                  <p>平均殖利率: <span className="text-emerald-500 font-mono font-black">{portfolioData.totalWeightedYield.toFixed(2)}%</span></p>
+                </div>
+
+                {portfolioData.allocationData.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-1 pt-1">
+                    {portfolioData.allocationData.map((item, index) => (
+                      <div key={index} className="flex justify-between items-center text-[10px] sm:text-[11px] py-1 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
+                          <span className={cn("font-bold truncate", darkMode ? "text-slate-300" : "text-slate-700")}>
+                            {item.fullName}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 sm:gap-4 font-mono shrink-0 ml-2 sm:ml-4">
+                          <span className="text-emerald-500 font-bold w-10 sm:w-12 text-right">{item.yield.toFixed(1)}%</span>
+                          <span className="text-indigo-500 font-bold w-16 sm:w-20 text-right">${item.value.toLocaleString()}</span>
+                          <span className={cn("w-10 sm:w-12 text-right font-bold", darkMode ? "text-slate-500" : "text-slate-400")}>
+                            {item.percentage.toFixed(1)}%
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-slate-400 italic py-2">尚無持股數據</p>
+                )}
               </div>
             </motion.div>
           ) : activeTab === 'history' ? (
@@ -2551,7 +2742,7 @@ function MainApp() {
             <motion.div 
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="space-y-3"
+              className="space-y-4"
             >
               <div className="grid grid-cols-1">
                 {stocks.length === 0 ? (
@@ -2569,549 +2760,763 @@ function MainApp() {
                   </div>
                 ) : (
                   <div>
-                    <div className="flex items-center gap-1.5 mb-3 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 w-fit">
-                      <button
-                        onClick={() => setStockFilterTab('all')}
-                        className={cn(
-                          "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
-                          stockFilterTab === 'all' 
-                            ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
-                            : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-                        )}
-                      >
-                        全部 ({stocks.length})
-                      </button>
-                      <button
-                        onClick={() => setStockFilterTab('active')}
-                        className={cn(
-                          "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
-                          stockFilterTab === 'active' 
-                            ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
-                            : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-                        )}
-                      >
-                        持股中 ({stocks.filter(s => s.shares > 0).length})
-                      </button>
-                      <button
-                        onClick={() => setStockFilterTab('sold')}
-                        className={cn(
-                          "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
-                          stockFilterTab === 'sold' 
-                            ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
-                            : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-                        )}
-                      >
-                        已清倉 ({stocks.filter(s => s.shares === 0).length})
-                      </button>
-                    </div>
-
-                    <div className="max-h-[560px] overflow-y-auto pr-1.5 space-y-3 custom-scrollbar">
-                      {stocks
-                        .filter(stock => {
-                          if (stockFilterTab === 'active') return stock.shares > 0;
-                          if (stockFilterTab === 'sold') return stock.shares === 0;
-                          return true;
-                        })
-                        .map((stock) => (
-                          <motion.div 
-                            key={stock.symbol}
-                            layout
-                            className={cn(
-                              "p-3 rounded-2xl shadow-sm border group relative transition-colors",
-                              darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100",
-                              stock.shares === 0 && "opacity-80"
-                            )}
-                          >
-                        <div className="flex justify-between items-start gap-2">
-                          <div className="flex-1 min-w-0">
-                            <h3 className={cn(
-                              "text-sm font-black leading-tight flex items-center flex-wrap gap-1.5",
-                              darkMode ? "text-slate-100" : "text-slate-800"
-                            )}>
-                              <span className="truncate">{stock.name}</span>
-                              {stock.dividendInfo?.isEtf && (
-                                <span className="px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 text-[8px] font-black uppercase shrink-0">ETF</span>
-                              )}
-                              {stock.shares === 0 && (
-                                <span className="px-1.5 py-0.5 rounded-md bg-slate-500/20 text-slate-400 text-[8px] font-black shrink-0">已清倉</span>
-                              )}
-                            </h3>
-                        <div className="flex items-center gap-2">
-                          <p className="text-[10px] font-bold text-slate-400">{stock.symbol}</p>
-                          {stock.dividendInfo?.currentPrice && (
-                            <p className="text-[10px] font-black text-indigo-500">
-                              現價: ${stock.dividendInfo.currentPrice.toLocaleString()}
-                            </p>
-                          )}
-                          {stock.dividendInfo?.updatedAt && (
-                            <span className="text-[8px] text-slate-500 font-medium">
-                              更新於: {new Date(stock.dividendInfo.updatedAt).toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex gap-1 items-center shrink-0">
-                        {stock.dividendInfo?.isEtf && (
-                          <button 
-                            onClick={() => toggleEtfExpansion(stock.symbol)}
-                            className={cn(
-                              "flex items-center gap-1 px-2 py-1 rounded-lg transition-all active:scale-95 whitespace-nowrap",
-                              expandedEtf.has(stock.symbol) 
-                                ? "bg-indigo-500 text-white shadow-sm" 
-                                : darkMode 
-                                  ? "bg-slate-800 text-indigo-400 hover:bg-slate-700" 
-                                  : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100"
-                            )}
-                          >
-                            <PieChart className="w-3.5 h-3.5 shrink-0" />
-                            <span className="text-[10px] font-black">成分股</span>
-                            {expandedEtf.has(stock.symbol) ? <ChevronUp className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
-                          </button>
-                        )}
+                    {/* Filter Tabs & Grouping Controls Top Bar */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+                      {/* Filter Tabs */}
+                      <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 w-fit">
                         <button
-                          onClick={() => handleRefreshStock(stock)}
-                          disabled={refreshingStocks.has(stock.symbol)}
+                          onClick={() => setStockFilterTab('all')}
                           className={cn(
-                            "p-1.5 rounded-lg transition-colors",
-                            darkMode ? "hover:bg-slate-800 text-slate-500" : "hover:bg-slate-100 text-slate-400"
+                            "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
+                            stockFilterTab === 'all' 
+                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                              : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                           )}
-                          title="重新整理此股票"
                         >
-                          <RefreshCw className={cn("w-3.5 h-3.5", refreshingStocks.has(stock.symbol) && "animate-spin")} />
+                          全部 ({stocks.length})
                         </button>
-                        <button 
-                          onClick={() => setStockToDelete({ symbol: stock.symbol, name: stock.name })}
+                        <button
+                          onClick={() => setStockFilterTab('active')}
                           className={cn(
-                            "p-1.5 rounded-lg transition-colors cursor-pointer",
-                            darkMode ? "text-slate-400 hover:bg-red-900/30 hover:text-red-400" : "text-slate-400 hover:bg-red-50 hover:text-red-500"
+                            "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
+                            stockFilterTab === 'active' 
+                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                              : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                           )}
-                          title="刪除或清倉"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          持股中 ({stocks.filter(s => s.shares > 0).length})
+                        </button>
+                        <button
+                          onClick={() => setStockFilterTab('sold')}
+                          className={cn(
+                            "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
+                            stockFilterTab === 'sold' 
+                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                              : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                          )}
+                        >
+                          已清倉 ({stocks.filter(s => s.shares === 0).length})
+                        </button>
+                      </div>
+
+                      {/* Grouping & Collapse Controls */}
+                      <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                        {/* Grouping Mode */}
+                        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 text-[11px] font-bold">
+                          <span className="text-slate-400 px-1 text-[10px]">分組:</span>
+                          <button
+                            onClick={() => setStockGrouping('none')}
+                            className={cn(
+                              "px-2 py-0.5 rounded-lg transition-all cursor-pointer",
+                              stockGrouping === 'none'
+                                ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-xs" : "bg-white text-indigo-600 shadow-xs")
+                                : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                            )}
+                          >
+                            無
+                          </button>
+                          <button
+                            onClick={() => setStockGrouping('type')}
+                            className={cn(
+                              "px-2 py-0.5 rounded-lg transition-all cursor-pointer",
+                              stockGrouping === 'type'
+                                ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-xs" : "bg-white text-indigo-600 shadow-xs")
+                                : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                            )}
+                          >
+                            類型
+                          </button>
+                          <button
+                            onClick={() => setStockGrouping('frequency')}
+                            className={cn(
+                              "px-2 py-0.5 rounded-lg transition-all cursor-pointer",
+                              stockGrouping === 'frequency'
+                                ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-xs" : "bg-white text-indigo-600 shadow-xs")
+                                : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                            )}
+                          >
+                            頻率
+                          </button>
+                        </div>
+
+                        {/* Collapse/Expand All Button */}
+                        <button
+                          onClick={handleToggleAllCardsCollapse}
+                          className={cn(
+                            "flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all border cursor-pointer shrink-0",
+                            darkMode ? "bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                          )}
+                          title="切換全部卡片展開/收合"
+                        >
+                          <ChevronsUpDown className="w-3.5 h-3.5" />
+                          <span>{collapsedStockCards.size >= filteredStocks.length ? "全部展開" : "全部收合"}</span>
                         </button>
                       </div>
                     </div>
 
-                    {stock.dividendInfo ? (
-                      <div className="mt-3 space-y-2">
-                        {/* Year Badge if not current year */}
-                        {(() => {
-                          const currentYear = new Date().getFullYear();
-                          const exYear = stock.dividendInfo.exDividendDate ? new Date(stock.dividendInfo.exDividendDate).getFullYear() : null;
-                          const payYear = stock.dividendInfo.paymentDate ? new Date(stock.dividendInfo.paymentDate).getFullYear() : null;
-                          const dataYear = exYear || payYear;
-                          
-                          if (dataYear && dataYear < currentYear) {
-                            return (
-                              <div className={cn(
-                                "px-2 py-1 rounded-lg text-[9px] font-bold flex items-center gap-1.5 mb-2",
-                                darkMode ? "bg-amber-500/10 text-amber-500" : "bg-amber-50 text-amber-600"
-                              )}>
-                                <AlertCircle className="w-3 h-3" />
-                                <span>顯示為 {dataYear} 年資訊 ({new Date().getFullYear()} 尚未公佈)</span>
-                              </div>
-                            );
-                          }
-                          return null;
-                        })()}
+                    <div className="max-h-[580px] overflow-y-auto pr-1.5 space-y-3 custom-scrollbar">
+                      {groupedStockList.map((group) => {
+                        const isGroupCollapsed = collapsedGroups.has(group.key);
 
-                        {/* ETF Components Dropdown */}
-                        <AnimatePresence>
-                          {expandedEtf.has(stock.symbol) && stock.dividendInfo?.isEtf && (
-                            <motion.div
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: 'auto', opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              className="overflow-hidden"
-                            >
-                              <div className={cn(
-                                "p-2 rounded-xl mb-2 space-y-1.5",
-                                darkMode ? "bg-slate-800/50" : "bg-slate-50/50"
-                              )}>
-                                <div className="flex justify-between items-center px-1 mb-1">
-                                  <p className="text-[8px] font-black text-indigo-500 uppercase tracking-wider">前十大成分股</p>
-                                </div>
-                                {stock.dividendInfo.topComponents && stock.dividendInfo.topComponents.length > 0 ? (
-                                  stock.dividendInfo.topComponents.map((comp, idx) => (
-                                    <div key={idx} className="flex justify-between items-center px-1">
-                                      <div className="flex items-center gap-1.5">
-                                        <span className="text-[9px] font-bold text-slate-500 w-3">{idx + 1}.</span>
-                                        <span className={cn(
-                                          "text-[10px] font-bold",
-                                          darkMode ? "text-slate-300" : "text-slate-600"
-                                        )}>{comp.name}</span>
-                                        <span className="text-[8px] font-medium text-slate-400">{comp.symbol}</span>
-                                      </div>
-                                      <span className="text-[10px] font-black text-indigo-400">{comp.weight}%</span>
-                                    </div>
-                                  ))
-                                ) : (
-                                  <div className="px-1 py-1">
-                                    <p className="text-[10px] text-slate-500 italic">尚未抓取到成分股資料，請點擊重新整理。</p>
-                                  </div>
+                        return (
+                          <div key={group.key} className="space-y-2">
+                            {/* Group Accordion Header if grouped */}
+                            {stockGrouping !== 'none' && group.title && (
+                              <div
+                                onClick={() => toggleGroupCollapse(group.key)}
+                                className={cn(
+                                  "flex items-center justify-between p-2.5 rounded-xl cursor-pointer select-none transition-all",
+                                  darkMode ? "bg-slate-800/80 hover:bg-slate-800 border border-slate-700/60" : "bg-slate-100 hover:bg-slate-200/80 border border-slate-200/50"
                                 )}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <Folder className="w-4 h-4 text-indigo-500" />
+                                  <span className={cn("text-xs font-black", darkMode ? "text-slate-200" : "text-slate-800")}>
+                                    {group.title}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 text-[10px] font-bold">
+                                    {group.stocks.length} 檔
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] text-slate-400 font-mono font-medium">
+                                    市值: ${group.stocks.reduce((sum, s) => sum + ((s.dividendInfo?.currentPrice || 0) * s.shares), 0).toLocaleString()}
+                                  </span>
+                                  {isGroupCollapsed ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronUp className="w-4 h-4 text-slate-400" />}
+                                </div>
                               </div>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
+                            )}
 
-                        {/* 1. 持股與成本輸入 (User Inputs) */}
-                        <div className={cn(
-                          "grid grid-cols-2 gap-2 p-2.5 sm:p-3 rounded-2xl transition-colors",
-                          darkMode ? "bg-slate-800/80 border border-slate-700/50" : "bg-slate-50 border border-slate-200/60"
-                        )}>
-                          <div>
-                            <p className="text-[10px] sm:text-xs font-bold text-indigo-400 uppercase tracking-wide mb-1">持有股數</p>
-                            <input
-                              type="number"
-                              key={`shares-${stock.symbol}-${stock.shares}`}
-                              defaultValue={stock.shares || ''}
-                              onFocus={(e) => e.target.select()}
-                              onBlur={(e) => handleUpdateShares(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
-                              className={cn(
-                                "w-full text-xs sm:text-sm font-black bg-transparent border-none p-0 focus:ring-0 focus:outline-none",
-                                darkMode ? "text-slate-100" : "text-slate-800"
-                              )}
-                            />
+                            {/* Group Items */}
+                            {!isGroupCollapsed && (
+                              <div className="space-y-2">
+                                {group.stocks.map((stock) => {
+                                  const isCardCollapsed = collapsedStockCards.has(stock.symbol);
+                                  const marketVal = (stock.dividendInfo?.currentPrice || 0) * stock.shares;
+                                  const costVal = (stock.cost || 0) * stock.shares;
+                                  const unrealizedPnl = marketVal - costVal;
+
+                                  const soldShares = stock.soldShares || 1000;
+                                  const sellPrice = stock.sellPrice || 0;
+                                  const cost = stock.cost || 0;
+                                  const realizedPnl = (sellPrice - cost) * soldShares;
+
+                                  return (
+                                    <motion.div 
+                                      key={stock.symbol}
+                                      layout
+                                      className={cn(
+                                        "p-3 rounded-2xl shadow-sm border group relative transition-colors",
+                                        darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100",
+                                        stock.shares === 0 && "opacity-80"
+                                      )}
+                                    >
+                                      {/* Header Row (Clickable to toggle card collapse) */}
+                                      <div className="flex justify-between items-center gap-2">
+                                        <div 
+                                          onClick={() => toggleStockCardCollapse(stock.symbol)}
+                                          className="flex-1 min-w-0 cursor-pointer flex items-center flex-wrap gap-x-2 gap-y-1"
+                                        >
+                                          <div className="flex items-center gap-1.5 min-w-0">
+                                            <span className={cn(
+                                              "text-sm font-black truncate",
+                                              darkMode ? "text-slate-100" : "text-slate-800"
+                                            )}>
+                                              {stock.name}
+                                            </span>
+                                            <span className="text-[10px] font-bold text-slate-400">{stock.symbol}</span>
+                                            {stock.dividendInfo?.isEtf && (
+                                              <span className="px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 text-[8px] font-black uppercase shrink-0">ETF</span>
+                                            )}
+                                            {stock.shares === 0 && (
+                                              <span className="px-1.5 py-0.5 rounded-md bg-slate-500/20 text-slate-400 text-[8px] font-black shrink-0">已清倉</span>
+                                            )}
+                                          </div>
+
+                                          {/* Compact Summary shown when Card is Collapsed */}
+                                          {isCardCollapsed && (
+                                            <div className="flex items-center gap-2 text-[11px] font-mono font-bold">
+                                              {stock.shares > 0 ? (
+                                                <>
+                                                  <span className="text-slate-400">{stock.shares.toLocaleString()}股</span>
+                                                  <span className="text-indigo-500">${Math.round(marketVal).toLocaleString()}</span>
+                                                  {stock.cost && stock.cost > 0 && (
+                                                    <span className={unrealizedPnl >= 0 ? "text-rose-500" : "text-emerald-500"}>
+                                                      {unrealizedPnl >= 0 ? '+' : ''}${Math.round(unrealizedPnl).toLocaleString()}
+                                                    </span>
+                                                  )}
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <span className="text-slate-400">賣出{soldShares.toLocaleString()}股</span>
+                                                  {sellPrice > 0 && cost > 0 && (
+                                                    <span className={realizedPnl >= 0 ? "text-rose-500" : "text-emerald-500"}>
+                                                      {realizedPnl >= 0 ? '+' : ''}${Math.round(realizedPnl).toLocaleString()}
+                                                    </span>
+                                                  )}
+                                                </>
+                                              )}
+                                            </div>
+                                          )}
+                                        </div>
+
+                                        {/* Action Buttons */}
+                                        <div className="flex gap-1 items-center shrink-0">
+                                          {stock.dividendInfo?.isEtf && (
+                                            <button 
+                                              onClick={() => toggleEtfExpansion(stock.symbol)}
+                                              className={cn(
+                                                "flex items-center gap-1 px-2 py-1 rounded-lg transition-all active:scale-95 whitespace-nowrap",
+                                                expandedEtf.has(stock.symbol) 
+                                                  ? "bg-indigo-500 text-white shadow-sm" 
+                                                  : darkMode 
+                                                    ? "bg-slate-800 text-indigo-400 hover:bg-slate-700" 
+                                                    : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100"
+                                              )}
+                                            >
+                                              <PieChart className="w-3.5 h-3.5 shrink-0" />
+                                              <span className="text-[10px] font-black hidden sm:inline">成分股</span>
+                                              {expandedEtf.has(stock.symbol) ? <ChevronUp className="w-3 h-3 shrink-0" /> : <ChevronDown className="w-3 h-3 shrink-0" />}
+                                            </button>
+                                          )}
+                                          <button
+                                            onClick={() => handleRefreshStock(stock)}
+                                            disabled={refreshingStocks.has(stock.symbol)}
+                                            className={cn(
+                                              "p-1.5 rounded-lg transition-colors",
+                                              darkMode ? "hover:bg-slate-800 text-slate-500" : "hover:bg-slate-100 text-slate-400"
+                                            )}
+                                            title="重新整理此股票"
+                                          >
+                                            <RefreshCw className={cn("w-3.5 h-3.5", refreshingStocks.has(stock.symbol) && "animate-spin")} />
+                                          </button>
+                                          <button 
+                                            onClick={() => setStockToDelete({ symbol: stock.symbol, name: stock.name })}
+                                            className={cn(
+                                              "p-1.5 rounded-lg transition-colors cursor-pointer",
+                                              darkMode ? "text-slate-400 hover:bg-red-900/30 hover:text-red-400" : "text-slate-400 hover:bg-red-50 hover:text-red-500"
+                                            )}
+                                            title="刪除或清倉"
+                                          >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                          </button>
+                                          {/* Card Collapse/Expand Arrow */}
+                                          <button
+                                            onClick={() => toggleStockCardCollapse(stock.symbol)}
+                                            className={cn(
+                                              "p-1.5 rounded-lg transition-colors cursor-pointer ml-0.5",
+                                              darkMode ? "text-slate-400 hover:bg-slate-800 hover:text-slate-200" : "text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                                            )}
+                                            title={isCardCollapsed ? "展開詳情" : "收合卡片"}
+                                          >
+                                            {isCardCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+                                          </button>
+                                        </div>
+                                      </div>
+
+                                      {/* Full Expanded Content */}
+                                      {!isCardCollapsed && (
+                                        <div className="mt-3 space-y-2 border-t pt-2.5 dark:border-slate-800 border-slate-100">
+                                          {/* Year Badge if not current year */}
+                                          {(() => {
+                                            const currentYear = new Date().getFullYear();
+                                            const exYear = stock.dividendInfo?.exDividendDate ? new Date(stock.dividendInfo.exDividendDate).getFullYear() : null;
+                                            const payYear = stock.dividendInfo?.paymentDate ? new Date(stock.dividendInfo.paymentDate).getFullYear() : null;
+                                            const dataYear = exYear || payYear;
+                                            
+                                            if (dataYear && dataYear < currentYear) {
+                                              return (
+                                                <div className={cn(
+                                                  "px-2 py-1 rounded-lg text-[9px] font-bold flex items-center gap-1.5 mb-2",
+                                                  darkMode ? "bg-amber-500/10 text-amber-500" : "bg-amber-50 text-amber-600"
+                                                )}>
+                                                  <AlertCircle className="w-3 h-3" />
+                                                  <span>顯示為 {dataYear} 年資訊 ({new Date().getFullYear()} 尚未公佈)</span>
+                                                </div>
+                                              );
+                                            }
+                                            return null;
+                                          })()}
+
+                                          {/* ETF Components Dropdown */}
+                                          <AnimatePresence>
+                                            {expandedEtf.has(stock.symbol) && stock.dividendInfo?.isEtf && (
+                                              <motion.div
+                                                initial={{ height: 0, opacity: 0 }}
+                                                animate={{ height: 'auto', opacity: 1 }}
+                                                exit={{ height: 0, opacity: 0 }}
+                                                className="overflow-hidden"
+                                              >
+                                                <div className={cn(
+                                                  "p-2 rounded-xl mb-2 space-y-1.5",
+                                                  darkMode ? "bg-slate-800/50" : "bg-slate-50/50"
+                                                )}>
+                                                  <div className="flex justify-between items-center px-1 mb-1">
+                                                    <span className="text-[10px] font-bold text-slate-400">主要成分股權重</span>
+                                                    {stock.dividendInfo.etfComponentsUpdatedAt && (
+                                                      <span className="text-[8px] text-slate-400">
+                                                        更新於: {new Date(stock.dividendInfo.etfComponentsUpdatedAt).toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit' })}
+                                                      </span>
+                                                    )}
+                                                  </div>
+                                                  {stock.dividendInfo.etfComponents && stock.dividendInfo.etfComponents.length > 0 ? (
+                                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+                                                      {stock.dividendInfo.etfComponents.map((comp, idx) => (
+                                                        <div 
+                                                          key={idx}
+                                                          className={cn(
+                                                            "px-2 py-1 rounded-lg text-[10px] flex justify-between items-center",
+                                                            darkMode ? "bg-slate-900/60" : "bg-white"
+                                                          )}
+                                                        >
+                                                          <span className={cn("font-medium truncate mr-1", darkMode ? "text-slate-300" : "text-slate-700")}>
+                                                            {comp.name}
+                                                          </span>
+                                                          <span className="font-mono font-bold text-indigo-500 shrink-0">
+                                                            {comp.weight}%
+                                                          </span>
+                                                        </div>
+                                                      ))}
+                                                    </div>
+                                                  ) : (
+                                                    <div className="text-[10px] text-slate-400 text-center py-2 italic">
+                                                      暫無成分股權重資料
+                                                    </div>
+                                                  )}
+                                                </div>
+                                              </motion.div>
+                                            )}
+                                          </AnimatePresence>
+
+                                          {/* 1. 持股/清倉與成本/賣價輸入 (User Inputs) */}
+                                          <div className={cn(
+                                            "grid gap-2 p-2.5 sm:p-3 rounded-2xl transition-colors",
+                                            stock.shares === 0 ? "grid-cols-3" : "grid-cols-2",
+                                            darkMode ? "bg-slate-800/80 border border-slate-700/50" : "bg-slate-50 border border-slate-200/60"
+                                          )}>
+                                            <div>
+                                              <p className="text-[10px] sm:text-xs font-bold text-indigo-400 uppercase tracking-wide mb-1">
+                                                {stock.shares === 0 ? '賣出股數' : '持有股數'}
+                                              </p>
+                                              <input
+                                                type="number"
+                                                step="any"
+                                                key={`shares-${stock.symbol}-${stock.shares}-${stock.soldShares ?? ''}`}
+                                                defaultValue={stock.shares === 0 ? (stock.soldShares ?? 1000) : (stock.shares || '')}
+                                                onFocus={(e) => e.target.select()}
+                                                onBlur={(e) => {
+                                                  const val = e.target.value === '' ? 0 : Number(e.target.value);
+                                                  if (stock.shares === 0) {
+                                                    handleUpdateSoldShares(stock.symbol, val);
+                                                  } else {
+                                                    handleUpdateShares(stock.symbol, val);
+                                                  }
+                                                }}
+                                                onKeyDown={(e) => {
+                                                  if (e.key === 'Enter') {
+                                                    (e.target as HTMLInputElement).blur();
+                                                  }
+                                                }}
+                                                className={cn(
+                                                  "w-full text-xs sm:text-sm font-black bg-transparent border-none p-0 focus:ring-0 focus:outline-none",
+                                                  darkMode ? "text-slate-100" : "text-slate-800"
+                                                )}
+                                              />
+                                            </div>
+                                            <div>
+                                              <p className="text-[10px] sm:text-xs font-bold text-amber-500 uppercase tracking-wide mb-1">買入成本</p>
+                                              <input
+                                                type="number"
+                                                step="any"
+                                                key={`cost-${stock.symbol}-${stock.shares}-${stock.cost ?? ''}`}
+                                                defaultValue={stock.cost ?? ''}
+                                                placeholder="買入單價"
+                                                onFocus={(e) => e.target.select()}
+                                                onBlur={(e) => handleUpdateCost(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
+                                                onKeyDown={(e) => {
+                                                  if (e.key === 'Enter') {
+                                                    (e.target as HTMLInputElement).blur();
+                                                  }
+                                                }}
+                                                className={cn(
+                                                  "w-full text-xs sm:text-sm font-black bg-transparent border-none p-0 focus:ring-0 focus:outline-none placeholder:text-slate-400/50",
+                                                  darkMode ? "text-slate-100" : "text-slate-800"
+                                                )}
+                                              />
+                                            </div>
+                                            {stock.shares === 0 && (
+                                              <div>
+                                                <p className="text-[10px] sm:text-xs font-bold text-rose-500 uppercase tracking-wide mb-1">賣出單價</p>
+                                                <input
+                                                  type="number"
+                                                  step="any"
+                                                  key={`sellPrice-${stock.symbol}-${stock.sellPrice ?? ''}`}
+                                                  defaultValue={stock.sellPrice ?? ''}
+                                                  placeholder="賣出單價"
+                                                  onFocus={(e) => e.target.select()}
+                                                  onBlur={(e) => handleUpdateSellPrice(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
+                                                  onKeyDown={(e) => {
+                                                    if (e.key === 'Enter') {
+                                                      (e.target as HTMLInputElement).blur();
+                                                    }
+                                                  }}
+                                                  className={cn(
+                                                    "w-full text-xs sm:text-sm font-black bg-transparent border-none p-0 focus:ring-0 focus:outline-none placeholder:text-slate-400/50",
+                                                    darkMode ? "text-slate-100" : "text-slate-800"
+                                                  )}
+                                                />
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          {/* 2. 資產與損益概況 */}
+                                          {stock.shares > 0 ? (
+                                            <div className={cn(
+                                              "p-2.5 sm:p-3 rounded-2xl space-y-2 transition-colors",
+                                              darkMode ? "bg-slate-800/50 border border-slate-800" : "bg-slate-100/60 border border-slate-200/40"
+                                            )}>
+                                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                                <div>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">現值</p>
+                                                  <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
+                                                    ${((stock.dividendInfo?.currentPrice || 0) * stock.shares).toLocaleString()}
+                                                  </p>
+                                                </div>
+                                                <div>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">總成本</p>
+                                                  <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
+                                                    {stock.cost && stock.cost > 0 ? `$${Math.round(stock.cost * stock.shares).toLocaleString()}` : '未設定'}
+                                                  </p>
+                                                </div>
+                                                <div>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">殖利率</p>
+                                                  <p className="text-xs sm:text-sm font-black text-emerald-500 truncate">
+                                                    {stock.dividendInfo?.yield?.toFixed(2) || '0.00'}%
+                                                  </p>
+                                                </div>
+                                                <div>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">佔比</p>
+                                                  <p className="text-xs sm:text-sm font-black text-indigo-500 truncate">
+                                                    {portfolioData.totalValue > 0 
+                                                      ? (((stock.dividendInfo?.currentPrice || 0) * stock.shares / portfolioData.totalValue) * 100).toFixed(1) 
+                                                      : '0.0'}%
+                                                  </p>
+                                                </div>
+                                              </div>
+
+                                              {/* 未實現損益 */}
+                                              {stock.cost && stock.cost > 0 ? (
+                                                <div className={cn(
+                                                  "pt-2 mt-2 border-t flex justify-between items-center",
+                                                  darkMode ? "border-slate-700/60" : "border-slate-200/80"
+                                                )}>
+                                                  <p className="text-[10px] sm:text-xs font-bold text-slate-400">未實現損益</p>
+                                                  <p className={cn(
+                                                    "text-xs sm:text-sm font-black",
+                                                    unrealizedPnl >= 0 ? "text-rose-500" : "text-emerald-500"
+                                                  )}>
+                                                    {unrealizedPnl >= 0 ? '+' : ''}
+                                                    ${Math.round(unrealizedPnl).toLocaleString()}
+                                                    <span className="text-[10px] font-bold ml-1">
+                                                      ({(unrealizedPnl / (stock.cost * stock.shares) * 100).toFixed(1)}%)
+                                                    </span>
+                                                  </p>
+                                                </div>
+                                              ) : null}
+                                            </div>
+                                          ) : (
+                                            /* 已清倉：已實現損益 */
+                                            <div className={cn(
+                                              "p-2.5 sm:p-3 rounded-2xl border transition-colors space-y-1.5",
+                                              darkMode ? "bg-slate-800/60 border-slate-700/60" : "bg-slate-50 border-slate-200/60"
+                                            )}>
+                                              {(() => {
+                                                const returnRate = cost > 0 ? ((sellPrice - cost) / cost) * 100 : 0;
+                                                return (
+                                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                                                    <div>
+                                                      <p className="text-[10px] sm:text-xs font-bold text-amber-500 uppercase tracking-wide">已實現損益 (清倉結算)</p>
+                                                      {sellPrice > 0 && cost > 0 && (
+                                                        <p className="text-[9px] text-slate-400 mt-0.5">
+                                                          (賣出價 ${sellPrice} - 買入成本 ${cost}) × {soldShares.toLocaleString()} 股
+                                                        </p>
+                                                      )}
+                                                    </div>
+                                                    {sellPrice > 0 && cost > 0 ? (
+                                                      <p className={cn(
+                                                        "text-xs sm:text-sm font-black font-mono",
+                                                        realizedPnl >= 0 ? "text-rose-500" : "text-emerald-500"
+                                                      )}>
+                                                        {realizedPnl >= 0 ? '+' : ''}${Math.round(realizedPnl).toLocaleString()}
+                                                        <span className="text-[10px] font-bold ml-1">
+                                                          ({returnRate >= 0 ? '+' : ''}{returnRate.toFixed(2)}%)
+                                                        </span>
+                                                      </p>
+                                                    ) : (
+                                                      <span className="text-[10px] font-bold text-slate-400 italic">請輸入買入成本與賣出單價</span>
+                                                    )}
+                                                  </div>
+                                                );
+                                              })()}
+                                            </div>
+                                          )}
+
+                                          {/* 3. 股息資訊 */}
+                                          {stock.dividendInfo ? (
+                                            <div className={cn(
+                                              "p-2.5 sm:p-3 rounded-2xl space-y-2 transition-colors",
+                                              darkMode ? "bg-slate-900/60 border border-slate-800" : "bg-white border border-slate-100 shadow-xs"
+                                            )}>
+                                              {stock.shares > 0 && (
+                                                <div className={cn(
+                                                  "p-2 sm:p-2.5 rounded-xl flex items-center justify-between",
+                                                  darkMode ? "bg-indigo-950/40 border border-indigo-900/40" : "bg-indigo-50/60 border border-indigo-100"
+                                                )}>
+                                                  <span className="text-[10px] sm:text-xs font-bold text-indigo-400 uppercase">本次預計領取</span>
+                                                  <span className={cn(
+                                                    "text-xs sm:text-sm font-black",
+                                                    !stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString())
+                                                      ? "text-slate-400 text-xs"
+                                                      : "text-indigo-500"
+                                                  )}>
+                                                    {stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString()) 
+                                                      ? `$${(stock.dividendInfo.amount * getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate, stock.shares)).toLocaleString()}`
+                                                      : '尚未公佈'}
+                                                  </span>
+                                                </div>
+                                              )}
+
+                                              <div className={cn("grid gap-2", stock.shares === 0 ? "grid-cols-3" : "grid-cols-2 sm:grid-cols-4")}>
+                                                <div className={cn("p-2 rounded-xl", darkMode ? "bg-emerald-950/20" : "bg-emerald-50/30")}>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-emerald-500 uppercase">今年已領</p>
+                                                  <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-emerald-400" : "text-emerald-700")}>
+                                                    {(() => {
+                                                      const exDateForCalc = stock.dividendInfo?.exDividendDate || `${new Date().getFullYear()}-06-15`;
+                                                      const effectiveExShares = getSharesOnExDate(stock.symbol, exDateForCalc, stock.shares);
+                                                      const recAmt = ((stock.dividendInfo as any).receivedAmountCurrentYear || (stock.dividendInfo as any).receivedAmount2026 || 0) * effectiveExShares;
+                                                      return `$${recAmt.toLocaleString()}`;
+                                                    })()}
+                                                  </p>
+                                                </div>
+
+                                                {stock.shares > 0 && (
+                                                  <div className={cn("p-2 rounded-xl", darkMode ? "bg-amber-950/20" : "bg-amber-50/30")}>
+                                                    <p className="text-[9px] sm:text-[10px] font-bold text-amber-500 uppercase">今年未領</p>
+                                                    <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-amber-400" : "text-amber-700")}>
+                                                      ${(((stock.dividendInfo as any).pendingAmountCurrentYear || (stock.dividendInfo as any).pendingAmount2026 || 0) * stock.shares).toLocaleString()}
+                                                    </p>
+                                                  </div>
+                                                )}
+
+                                                <div className={cn("p-2 rounded-xl", darkMode ? "bg-slate-800/80" : "bg-slate-100/70")}>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">除息日</p>
+                                                  <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-slate-200" : "text-slate-700")}>
+                                                    {stock.dividendInfo.exDividendDate || '未定'}
+                                                  </p>
+                                                </div>
+
+                                                <div className={cn("p-2 rounded-xl", darkMode ? "bg-slate-800/80" : "bg-slate-100/70")}>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">發放日</p>
+                                                  <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-slate-200" : "text-slate-700")}>
+                                                    {stock.dividendInfo.paymentDate || '未定'}
+                                                  </p>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                      )}
+                                    </motion.div>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
-                          <div>
-                            <p className="text-[10px] sm:text-xs font-bold text-amber-500 uppercase tracking-wide mb-1">成本單價</p>
-                            <input
-                              type="number"
-                              step="0.01"
-                              key={`cost-${stock.symbol}-${stock.cost ?? ''}`}
-                              defaultValue={stock.cost ?? ''}
-                              placeholder="未設定"
-                              onFocus={(e) => e.target.select()}
-                              onBlur={(e) => handleUpdateCost(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
-                              className={cn(
-                                "w-full text-xs sm:text-sm font-black bg-transparent border-none p-0 focus:ring-0 focus:outline-none placeholder:text-slate-400/50",
-                                darkMode ? "text-slate-100" : "text-slate-800"
-                              )}
-                            />
-                          </div>
-                        </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+              )}
+              </div>
 
-                        {/* 2. 資產與損益概況 (Asset, P&L, Yield, Ratio) */}
-                        <div className={cn(
-                          "p-2.5 sm:p-3 rounded-2xl space-y-2 transition-colors",
-                          darkMode ? "bg-slate-800/50 border border-slate-800" : "bg-slate-100/60 border border-slate-200/40"
+              {/* Overall Unrealized / Realized Profit & Loss Summary Card (Moved to bottom) */}
+              <div className={cn(
+                "p-3.5 sm:p-4 rounded-2xl shadow-sm border transition-colors space-y-3.5 mt-4",
+                darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
+              )}>
+                <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-100 dark:border-slate-700/60">
+                  <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                    <div className={cn(
+                      "p-2 sm:p-2.5 rounded-xl shrink-0",
+                      (stockFilterTab === 'sold' ? portfolioData.totalRealizedProfit : portfolioData.totalUnrealizedProfit) >= 0
+                        ? (darkMode ? "bg-rose-950/40 text-rose-400 border border-rose-900/50" : "bg-rose-50 text-rose-500 border border-rose-100")
+                        : (darkMode ? "bg-emerald-950/40 text-emerald-400 border border-emerald-900/50" : "bg-emerald-50 text-emerald-500 border border-emerald-100")
+                    )}>
+                      <TrendingUp className="w-4 h-4 sm:w-5 sm:h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <h2 className={cn("text-[11px] sm:text-xs font-black uppercase tracking-wider truncate", darkMode ? "text-slate-400" : "text-slate-500")}>
+                        {stockFilterTab === 'sold' ? '總已實現損益 (已清倉)' : '庫存未實現損益'}
+                      </h2>
+                      <div className="flex flex-wrap items-baseline gap-1.5 sm:gap-2 mt-0.5">
+                        <span className={cn(
+                          "text-base sm:text-2xl font-black font-mono shrink-0",
+                          (stockFilterTab === 'sold' ? portfolioData.totalRealizedProfit : portfolioData.totalUnrealizedProfit) >= 0 ? "text-rose-500" : "text-emerald-500"
                         )}>
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                            <div>
-                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">現值</p>
-                              <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
-                                ${((stock.dividendInfo.currentPrice || 0) * stock.shares).toLocaleString()}
-                              </p>
-                            </div>
-                            <div>
-                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">總成本</p>
-                              <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
-                                {stock.cost && stock.cost > 0 ? `$${Math.round(stock.cost * stock.shares).toLocaleString()}` : '未設定'}
-                              </p>
-                            </div>
-                            <div>
-                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">殖利率</p>
-                              <p className="text-xs sm:text-sm font-black text-emerald-500 truncate">
-                                {stock.dividendInfo.yield?.toFixed(2) || '0.00'}%
-                              </p>
-                            </div>
-                            <div>
-                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">佔比</p>
-                              <p className="text-xs sm:text-sm font-black text-indigo-500 truncate">
-                                {portfolioData.totalValue > 0 
-                                  ? (((stock.dividendInfo.currentPrice || 0) * stock.shares / portfolioData.totalValue) * 100).toFixed(1) 
-                                  : '0.0'}%
-                              </p>
-                            </div>
-                          </div>
-
-                          {/* 未實現損益 (If cost is provided) */}
-                          {stock.cost && stock.cost > 0 ? (
-                            <div className={cn(
-                              "pt-2 mt-2 border-t flex justify-between items-center",
-                              darkMode ? "border-slate-700/60" : "border-slate-200/80"
-                            )}>
-                              <p className="text-[10px] sm:text-xs font-bold text-slate-400">未實現損益</p>
-                              <p className={cn(
-                                "text-xs sm:text-sm font-black",
-                                ((stock.dividendInfo.currentPrice || 0) * stock.shares - stock.cost * stock.shares) >= 0 
-                                  ? "text-rose-500" 
-                                  : "text-emerald-500"
-                              )}>
-                                {((stock.dividendInfo.currentPrice || 0) * stock.shares - stock.cost * stock.shares) >= 0 ? '+' : ''}
-                                ${Math.round((stock.dividendInfo.currentPrice || 0) * stock.shares - stock.cost * stock.shares).toLocaleString()}
-                                <span className="text-[10px] font-bold ml-1">
-                                  ({(((stock.dividendInfo.currentPrice || 0) * stock.shares - stock.cost * stock.shares) / (stock.cost * stock.shares) * 100).toFixed(1)}%)
-                                </span>
-                              </p>
-                            </div>
-                          ) : null}
-                        </div>
-
-                        {/* 3. 股息領取與日程 (Dividend Estimates & Dates) */}
-                        <div className={cn(
-                          "p-2.5 sm:p-3 rounded-2xl space-y-2.5 transition-colors",
-                          darkMode ? "bg-slate-900/60 border border-slate-800" : "bg-white border border-slate-100 shadow-xs"
-                        )}>
-                          {/* 本次預計領取 */}
-                          <div className={cn(
-                            "p-2 sm:p-2.5 rounded-xl flex items-center justify-between",
-                            darkMode ? "bg-indigo-950/40 border border-indigo-900/40" : "bg-indigo-50/60 border border-indigo-100"
+                          {(stockFilterTab === 'sold' ? portfolioData.totalRealizedProfit : portfolioData.totalUnrealizedProfit) >= 0 ? '+' : ''}${Math.round(stockFilterTab === 'sold' ? portfolioData.totalRealizedProfit : portfolioData.totalUnrealizedProfit).toLocaleString()}
+                        </span>
+                        {(stockFilterTab === 'sold' ? portfolioData.totalSoldCost : portfolioData.totalCost) > 0 && (
+                          <span className={cn(
+                            "text-[10px] sm:text-xs font-black px-1.5 sm:px-2 py-0.5 rounded-md font-mono shrink-0",
+                            (stockFilterTab === 'sold' ? portfolioData.totalRealizedProfit : portfolioData.totalUnrealizedProfit) >= 0
+                              ? "bg-rose-500/10 text-rose-500"
+                              : "bg-emerald-500/10 text-emerald-500"
                           )}>
-                            <span className="text-[10px] sm:text-xs font-bold text-indigo-400 uppercase">本次預計領取</span>
-                            <span className={cn(
-                              "text-xs sm:text-sm font-black",
-                              !stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString())
-                                ? "text-slate-400 text-xs"
-                                : "text-indigo-500"
-                            )}>
-                              {stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString()) 
-                                ? `$${(stock.dividendInfo.amount * getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate, stock.shares)).toLocaleString()}`
-                                : '尚未公佈'}
-                            </span>
-                          </div>
-
-                          {/* 今年已領 / 今年未領 / 除息日 / 發放日 2x2 Grid */}
-                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                            <div className={cn("p-2 rounded-xl", darkMode ? "bg-emerald-950/20" : "bg-emerald-50/30")}>
-                              <p className="text-[9px] sm:text-[10px] font-bold text-emerald-500 uppercase">今年已領</p>
-                              <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-emerald-400" : "text-emerald-700")}>
-                                {(() => {
-                                  const exDateForCalc = stock.dividendInfo?.exDividendDate || `${new Date().getFullYear()}-06-15`;
-                                  const effectiveExShares = getSharesOnExDate(stock.symbol, exDateForCalc, stock.shares);
-                                  const recAmt = ((stock.dividendInfo as any).receivedAmountCurrentYear || (stock.dividendInfo as any).receivedAmount2026 || 0) * effectiveExShares;
-                                  return `$${recAmt.toLocaleString()}`;
-                                })()}
-                              </p>
-                            </div>
-
-                            <div className={cn("p-2 rounded-xl", darkMode ? "bg-amber-950/20" : "bg-amber-50/30")}>
-                              <p className="text-[9px] sm:text-[10px] font-bold text-amber-500 uppercase">今年未領</p>
-                              <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-amber-400" : "text-amber-700")}>
-                                ${(((stock.dividendInfo as any).pendingAmountCurrentYear || (stock.dividendInfo as any).pendingAmount2026 || 0) * stock.shares).toLocaleString()}
-                              </p>
-                            </div>
-
-                            <div className={cn("p-2 rounded-xl", darkMode ? "bg-slate-800/80" : "bg-slate-100/70")}>
-                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">除息日</p>
-                              <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-slate-200" : "text-slate-700")}>
-                                {stock.dividendInfo.exDividendDate || '未定'}
-                              </p>
-                            </div>
-
-                            <div className={cn("p-2 rounded-xl", darkMode ? "bg-slate-800/80" : "bg-slate-100/70")}>
-                              <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">發放日</p>
-                              <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-slate-200" : "text-slate-700")}>
-                                {stock.dividendInfo.paymentDate || '未定'}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
+                            {(stockFilterTab === 'sold' ? portfolioData.totalRealizedProfit : portfolioData.totalUnrealizedProfit) >= 0 ? '▲' : '▼'} {Math.abs(stockFilterTab === 'sold' ? portfolioData.totalRealizedReturnRate : portfolioData.totalReturnRate).toFixed(2)}%
+                          </span>
+                        )}
                       </div>
-                    ) : (
-                      <div className="mt-2 space-y-2">
-                        <div className={cn(
-                          "p-2 rounded-xl flex items-center justify-between transition-colors",
-                          darkMode ? "bg-slate-800" : "bg-slate-50"
-                        )}>
-                          <p className="text-[10px] text-slate-500 font-medium italic">
-                            無股息資訊，請點擊重新整理。
-                          </p>
-                          <div className="flex items-center gap-2">
-                            <span className="text-[8px] font-bold text-slate-400 uppercase">股數</span>
-                            <input
-                              type="number"
-                              defaultValue={stock.shares || ''}
-                              onFocus={(e) => e.target.select()}
-                              onBlur={(e) => handleUpdateShares(stock.symbol, e.target.value === '' ? 0 : Number(e.target.value))}
-                              className={cn(
-                                "w-16 text-xs font-bold rounded-lg px-2 py-1 focus:ring-1 focus:ring-indigo-500 focus:outline-none transition-colors",
-                                darkMode ? "bg-slate-900 text-slate-100" : "bg-white/50 text-slate-700"
-                              )}
-                            />
-                          </div>
-                        </div>
-                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions Header */}
+                  <div className="flex items-center gap-2 shrink-0">
+                    {stocks.length > 0 && (
+                      <button
+                        onClick={handleExportCSV}
+                        className={cn(
+                          "flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold transition-all active:scale-95 shadow-xs border cursor-pointer shrink-0",
+                          darkMode 
+                            ? "bg-slate-700 text-indigo-400 hover:bg-slate-600 border-slate-600/50" 
+                            : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100 border-indigo-100/50"
+                        )}
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span className="whitespace-nowrap">匯出 CSV</span>
+                      </button>
                     )}
-                      </motion.div>
-                    ))}
                   </div>
                 </div>
-              )}
-            </div>
-          </motion.div>
-        )}
-        </div>
 
-        {/* Portfolio Dashboard - Moved to bottom */}
-        <div className={cn(
-          "p-4 rounded-2xl shadow-sm border transition-colors flex flex-col",
-          darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-100"
-        )}>
-          <div className="flex flex-col gap-2 mb-4 shrink-0">
-            {/* Top row: Title/Dropdown on left, Export Button on right */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <h2 className={cn("text-sm font-black", darkMode ? "text-slate-100" : "text-slate-900")}>庫存分佈</h2>
-                <select
-                  value={componentLimit}
-                  onChange={(e) => setComponentLimit(Number(e.target.value))}
-                  className={cn(
-                    "text-[10px] font-bold rounded-lg px-2 py-1 border-none focus:ring-0",
-                    darkMode ? "bg-slate-700 text-slate-200" : "bg-slate-100 text-slate-600"
+                {/* Financial Metrics Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {stockFilterTab === 'sold' ? (
+                    <>
+                      <div className={cn("p-2.5 rounded-xl border", darkMode ? "bg-slate-900/60 border-slate-700/50" : "bg-slate-50 border-slate-100")}>
+                        <p className="text-[9px] font-extrabold uppercase text-slate-400">清倉股票總成本</p>
+                        <p className={cn("text-xs sm:text-sm font-black mt-0.5 font-mono", darkMode ? "text-slate-200" : "text-slate-800")}>
+                          {portfolioData.totalSoldCost > 0 ? `$${Math.round(portfolioData.totalSoldCost).toLocaleString()}` : '未設定成本'}
+                        </p>
+                      </div>
+
+                      <div className={cn("p-2.5 rounded-xl border", darkMode ? "bg-slate-900/60 border-slate-700/50" : "bg-slate-50 border-slate-100")}>
+                        <p className="text-[9px] font-extrabold uppercase text-slate-400">清倉股票總賣出額</p>
+                        <p className="text-xs sm:text-sm font-black text-indigo-500 mt-0.5 font-mono">
+                          ${Math.round(portfolioData.totalSoldCost + portfolioData.totalRealizedProfit).toLocaleString()}
+                        </p>
+                      </div>
+
+                      <div className={cn("p-2.5 rounded-xl border", darkMode ? "bg-slate-900/60 border-slate-700/50" : "bg-slate-50 border-slate-100")}>
+                        <p className="text-[9px] font-extrabold uppercase text-slate-400">已清倉檔數</p>
+                        <p className="text-xs sm:text-sm font-black text-emerald-500 mt-0.5 font-mono">
+                          {stocks.filter(s => s.shares === 0).length} 檔
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className={cn("p-2.5 rounded-xl border", darkMode ? "bg-slate-900/60 border-slate-700/50" : "bg-slate-50 border-slate-100")}>
+                        <p className="text-[9px] font-extrabold uppercase text-slate-400">總投資成本</p>
+                        <p className={cn("text-xs sm:text-sm font-black mt-0.5 font-mono", darkMode ? "text-slate-200" : "text-slate-800")}>
+                          {portfolioData.totalCost > 0 ? `$${Math.round(portfolioData.totalCost).toLocaleString()}` : '未設定成本'}
+                        </p>
+                      </div>
+
+                      <div className={cn("p-2.5 rounded-xl border", darkMode ? "bg-slate-900/60 border-slate-700/50" : "bg-slate-50 border-slate-100")}>
+                        <p className="text-[9px] font-extrabold uppercase text-slate-400">持股總現值</p>
+                        <p className="text-xs sm:text-sm font-black text-indigo-500 mt-0.5 font-mono">
+                          ${Math.round(portfolioData.totalValue).toLocaleString()}
+                        </p>
+                      </div>
+
+                      <div className={cn("p-2.5 rounded-xl border", darkMode ? "bg-slate-900/60 border-slate-700/50" : "bg-slate-50 border-slate-100")}>
+                        <p className="text-[9px] font-extrabold uppercase text-slate-400">平均殖利率</p>
+                        <p className="text-xs sm:text-sm font-black text-emerald-500 mt-0.5 font-mono">
+                          {portfolioData.totalWeightedYield.toFixed(2)}%
+                        </p>
+                      </div>
+                    </>
                   )}
-                >
-                  <option value={5}>Top 5</option>
-                  <option value={10}>Top 10</option>
-                  <option value={20}>Top 20</option>
-                </select>
-              </div>
-              
-              {stocks.length > 0 && (
-                <button
-                  onClick={handleExportCSV}
-                  className={cn(
-                    "flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] font-bold transition-all active:scale-95 shadow-sm border cursor-pointer",
-                    darkMode 
-                      ? "bg-slate-700 text-indigo-400 hover:bg-slate-600 border-slate-600/50" 
-                      : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100 border-indigo-100/50"
-                  )}
-                >
-                  <Download className="w-3 h-3" />
-                  <span>匯出 CSV</span>
-                </button>
-              )}
-            </div>
-            
-            {/* Stats info row */}
-            <div className="flex flex-wrap items-center gap-3">
-              <p className={cn("text-[10px] sm:text-xs font-bold", darkMode ? "text-slate-400" : "text-slate-500")}>
-                平均殖利率: <span className="text-emerald-500 mr-2">{portfolioData.totalWeightedYield.toFixed(2)}%</span>
-                總現值: <span className="text-indigo-500">${portfolioData.totalValue.toLocaleString()}</span>
-              </p>
-            </div>
-          </div>
 
-          {/* Cash & Assets Info Summary */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4 p-3.5 rounded-2xl bg-slate-50/70 dark:bg-slate-900/60 border border-slate-200/50 dark:border-slate-800">
-            {/* Stocks Assets */}
-            <div className="flex flex-col">
-              <span className="text-[10px] font-extrabold tracking-wider uppercase text-slate-600 dark:text-slate-300">我的證券 (Stocks)</span>
-              <span className="text-sm font-black text-indigo-600 dark:text-indigo-400 mt-1">${portfolioData.totalValue.toLocaleString()}</span>
-              {/* Progress indicator */}
-              <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800/80 overflow-hidden">
-                <div 
-                  className="h-full bg-indigo-500 dark:bg-indigo-400 rounded-full" 
-                  style={{ width: `${portfolioData.totalValue + cash > 0 ? (portfolioData.totalValue / (portfolioData.totalValue + cash)) * 100 : 0}%` }}
-                />
-              </div>
-              <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mt-1">
-                佔總資產: {portfolioData.totalValue + cash > 0 ? ((portfolioData.totalValue / (portfolioData.totalValue + cash)) * 100).toFixed(1) : 0}%
-              </span>
-            </div>
-
-            {/* Cash Assets */}
-            <div className="flex flex-col relative group">
-              <span className="text-[10px] font-extrabold tracking-wider uppercase text-slate-600 dark:text-slate-300">我的現金 (Cash)</span>
-              {isEditingCash ? (
-                <div className="flex items-center gap-1.5 mt-1">
-                  <span className="text-xs font-black text-emerald-600 dark:text-emerald-400">$</span>
-                  <input
-                    type="number"
-                    value={cashInput}
-                    onChange={(e) => setCashInput(e.target.value)}
-                    onBlur={() => {
-                      const value = cashInput === '' ? 0 : Number(cashInput);
-                      handleUpdateCash(value);
-                      setIsEditingCash(false);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        const value = cashInput === '' ? 0 : Number(cashInput);
-                        handleUpdateCash(value);
-                        setIsEditingCash(false);
-                      }
-                    }}
-                    autoFocus
-                    placeholder="輸入現金金額"
-                    onFocus={(e) => e.target.select()}
-                    className={cn(
-                      "w-28 text-xs font-bold rounded-lg px-2 py-0.5 border border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500",
-                      darkMode ? "bg-slate-800 text-slate-200" : "bg-white text-slate-700"
+                  <div className={cn("p-2.5 rounded-xl border relative group", darkMode ? "bg-slate-900/60 border-slate-700/50" : "bg-slate-50 border-slate-100")}>
+                    <p className="text-[9px] font-extrabold uppercase text-slate-400">我的現金 (Cash)</p>
+                    {isEditingCash ? (
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <span className="text-xs font-black text-emerald-500">$</span>
+                        <input
+                          type="number"
+                          value={cashInput}
+                          onChange={(e) => setCashInput(e.target.value)}
+                          onBlur={() => {
+                            const value = cashInput === '' ? 0 : Number(cashInput);
+                            handleUpdateCash(value);
+                            setIsEditingCash(false);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              const value = cashInput === '' ? 0 : Number(cashInput);
+                              handleUpdateCash(value);
+                              setIsEditingCash(false);
+                            }
+                          }}
+                          autoFocus
+                          placeholder="金額"
+                          onFocus={(e) => e.target.select()}
+                          className={cn(
+                            "w-20 text-xs font-black rounded px-1 py-0.5 border border-indigo-500 focus:outline-none",
+                            darkMode ? "bg-slate-800 text-slate-200" : "bg-white text-slate-700"
+                          )}
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between gap-1 mt-0.5">
+                        <span className="text-xs sm:text-sm font-black text-emerald-500 font-mono">${cash.toLocaleString()}</span>
+                        <button 
+                          onClick={() => {
+                            setCashInput(cash.toString());
+                            setIsEditingCash(true);
+                          }}
+                          className={cn(
+                            "text-[8px] font-black uppercase px-1.5 py-0.5 rounded border transition-all active:scale-95 cursor-pointer",
+                            darkMode 
+                              ? "bg-slate-700 hover:bg-slate-600 text-slate-200 border-slate-600" 
+                              : "bg-white hover:bg-slate-100 text-slate-700 border-slate-200"
+                          )}
+                        >
+                          修改
+                        </button>
+                      </div>
                     )}
-                  />
+                  </div>
                 </div>
-              ) : (
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">${cash.toLocaleString()}</span>
-                  <button 
-                    onClick={() => {
-                      setCashInput(cash.toString());
-                      setIsEditingCash(true);
-                    }}
-                    className={cn(
-                      "text-[9px] font-black tracking-wider uppercase px-2 py-0.5 rounded-lg border shadow-sm transition-all active:scale-95",
-                      darkMode 
-                        ? "bg-slate-700 hover:bg-slate-600 text-slate-200 border-slate-600" 
-                        : "bg-white hover:bg-slate-100 text-slate-700 border-slate-200"
-                    )}
-                  >
-                    設定金額
-                  </button>
-                </div>
-              )}
-              {/* Progress indicator */}
-              <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800/80 overflow-hidden">
-                <div 
-                  className="h-full bg-emerald-500 dark:bg-emerald-400 rounded-full" 
-                  style={{ width: `${portfolioData.totalValue + cash > 0 ? (cash / (portfolioData.totalValue + cash)) * 100 : 0}%` }}
-                />
-              </div>
-              <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mt-1">
-                佔總資產: {portfolioData.totalValue + cash > 0 ? ((cash / (portfolioData.totalValue + cash)) * 100).toFixed(1) : 0}%
-              </span>
-            </div>
 
-            {/* Total Assets */}
-            <div className="flex flex-col">
-              <span className="text-[10px] font-extrabold tracking-wider uppercase text-slate-600 dark:text-slate-300">總資產價值 (Total Net Worth)</span>
-              <span className={cn("text-sm font-black mt-1", darkMode ? "text-slate-100" : "text-slate-800")}>
-                ${(portfolioData.totalValue + cash).toLocaleString()}
-              </span>
-              <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-200 dark:bg-slate-800/80 overflow-hidden flex">
-                <div 
-                  className="h-full bg-indigo-500 dark:bg-indigo-400" 
-                  style={{ width: `${portfolioData.totalValue + cash > 0 ? (portfolioData.totalValue / (portfolioData.totalValue + cash)) * 100 : 100}%` }}
-                />
-                <div 
-                  className="h-full bg-emerald-500 dark:bg-emerald-400" 
-                  style={{ width: `${portfolioData.totalValue + cash > 0 ? (cash / (portfolioData.totalValue + cash)) * 100 : 0}%` }}
-                />
-              </div>
-              <span className="text-[10px] text-slate-500 dark:text-slate-400 font-bold mt-1">證券 + 現金</span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-1">
-            {portfolioData.allocationData.map((item, index) => (
-              <div key={index} className="flex justify-between items-center text-[10px] sm:text-[11px] py-1 border-b border-slate-100 dark:border-slate-700/50 last:border-0">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <div className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: COLORS[index % COLORS.length] }} />
-                  <span className={cn("font-bold truncate", darkMode ? "text-slate-300" : "text-slate-700")}>
-                    {item.fullName}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 sm:gap-4 font-mono shrink-0 ml-2 sm:ml-4">
-                  <span className="text-emerald-500 font-bold w-10 sm:w-12 text-right">{item.yield.toFixed(1)}%</span>
-                  <span className="text-indigo-500 font-bold w-16 sm:w-20 text-right">${item.value.toLocaleString()}</span>
-                  <span className={cn("w-10 sm:w-12 text-right font-bold", darkMode ? "text-slate-500" : "text-slate-400")}>
-                    {item.percentage.toFixed(1)}%
-                  </span>
+                {/* Asset Breakdown Bar */}
+                <div className={cn(
+                  "p-2.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs font-bold",
+                  darkMode ? "bg-slate-900/40 border-slate-700/50 text-slate-300" : "bg-slate-50/80 border-slate-100 text-slate-700"
+                )}>
+                  <div className="flex items-center gap-2">
+                    <span className="opacity-60 text-[11px]">總資產價值 (證券+現金):</span>
+                    <span className="font-mono font-black text-indigo-500 text-sm">${(portfolioData.totalValue + cash).toLocaleString()}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-[10px] font-mono">
+                    <span>證券: <strong className="text-indigo-400">{portfolioData.totalValue + cash > 0 ? ((portfolioData.totalValue / (portfolioData.totalValue + cash)) * 100).toFixed(1) : 0}%</strong></span>
+                    <span>現金: <strong className="text-emerald-400">{portfolioData.totalValue + cash > 0 ? ((cash / (portfolioData.totalValue + cash)) * 100).toFixed(1) : 0}%</strong></span>
+                  </div>
                 </div>
               </div>
-            ))}
-          </div>
+            </motion.div>
+          )}
         </div>
 
         {/* Clear / Delete Stock Confirmation Modal */}
