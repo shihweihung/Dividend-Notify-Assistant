@@ -1,7 +1,8 @@
 export type EtfComponent = {
   name: string;
-  symbol: string;
-  weight: number; // percentage
+  symbol?: string;
+  code?: string;
+  weight: number | string; // percentage
 }
 
 export type DividendInfo = {
@@ -19,6 +20,8 @@ export type DividendInfo = {
   updatedAt: string;
   isEtf?: boolean;
   topComponents?: EtfComponent[];
+  etfComponents?: EtfComponent[];
+  etfComponentsUpdatedAt?: string;
   source?: string;
   sourceUrl?: string;
   isPaymentDateEstimated?: boolean;

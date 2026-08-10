@@ -577,10 +577,10 @@ async function startServer() {
         const dayOfWeek = taipeiTime.day(); // 0 is Sunday, 6 is Saturday
         const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
 
-        // Check if it's 2:00 PM (14:00) Taipei time and hasn't run today yet
-        if (hourMinute === "14:00" && lastUpdateRunDate !== todayStr) {
+        // Check if it's 2:00 PM (14:00) or later Taipei time and hasn't run today yet
+        if (taipeiTime.hour() >= 14 && lastUpdateRunDate !== todayStr) {
           lastUpdateRunDate = todayStr;
-          console.log(`[Scheduler] It is 14:00 Taipei time (${todayStr}). Triggering daily batch snapshot & stock update...`);
+          console.log(`[Scheduler] It is ${taipeiTime.format("HH:mm")} Taipei time (${todayStr}). Triggering daily batch snapshot & stock update...`);
           await runDailyBatchCore();
         }
       } catch (err: any) {
@@ -603,9 +603,23 @@ async function startServer() {
     const taipeiTime = moment().tz("Asia/Taipei");
     const todayStr = taipeiTime.format("YYYY-MM-DD");
 
+    const normalizeDateStr = (d: any) => {
+      if (!d || typeof d !== 'string') return '';
+      const cleaned = d.trim().replace(/\//g, '-');
+      const parts = cleaned.split('-');
+      if (parts.length === 3) {
+        const y = parts[0];
+        const m = parts[1].padStart(2, '0');
+        const day = parts[2].padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+      return cleaned;
+    };
+
     let notificationsSent = 0;
     let logsCreated = 0;
     const processedChatIds = new Set<string>();
+    const sentKeysInMemory = new Set<string>();
 
     try {
       // 1. Process authenticated users collection
@@ -613,21 +627,28 @@ async function startServer() {
       for (const userDoc of usersSnapshot.docs) {
         const userId = userDoc.id;
         const userData = userDoc.data() || {};
-        const chatId = userData.telegramChatId ? String(userData.telegramChatId) : null;
-        const botToken = userData.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || "";
+        const chatId = userData.telegramChatId ? String(userData.telegramChatId).trim() : null;
+        const botToken = (userData.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
 
         if (!chatId || !botToken) continue;
         processedChatIds.add(chatId);
 
         const stocksSnapshot = await adminDb.collection("users").doc(userId).collection("stocks").get();
-        const userStocks = stocksSnapshot.docs.map((d: any) => d.data());
+        const rawStocks = stocksSnapshot.docs.map((d: any) => d.data());
+        
+        // Deduplicate stocks array by symbol to avoid processing duplicate stock entries
+        const stockMap = new Map<string, any>();
+        for (const s of rawStocks) {
+          if (s && s.symbol) stockMap.set(String(s.symbol).trim(), s);
+        }
+        const userStocks = Array.from(stockMap.values());
 
         for (const stock of userStocks) {
-          if (!stock || !stock.dividendInfo) continue;
-          const symbol = stock.symbol;
+          if (!stock) continue;
+          const symbol = String(stock.symbol).trim();
           const stockName = stock.name || symbol;
           const shares = Number(stock.shares) || 0;
-          const info = stock.dividendInfo;
+          const info = stock.dividendInfo || stock;
 
           const eventsToNotify: { type: 'ex-dividend' | 'payment'; amount: number }[] = [];
 
@@ -636,8 +657,8 @@ async function startServer() {
             const seenPay = new Set<string>();
 
             for (const div of info.history) {
-              const exDateStr = div.date; // YYYY-MM-DD
-              let payDateStr = div.paymentDate || div.payDate;
+              const exDateStr = normalizeDateStr(div.date);
+              let payDateStr = normalizeDateStr(div.paymentDate || div.payDate);
 
               if (!payDateStr && exDateStr) {
                 const mEx = moment(exDateStr);
@@ -650,7 +671,7 @@ async function startServer() {
                 seenEx.add(exDateStr);
                 eventsToNotify.push({
                   type: 'ex-dividend',
-                  amount: div.amount || info.amount || 0
+                  amount: Number(div.amount || info.amount || 0)
                 });
               }
 
@@ -658,35 +679,41 @@ async function startServer() {
                 seenPay.add(payDateStr);
                 eventsToNotify.push({
                   type: 'payment',
-                  amount: div.amount || info.amount || 0
+                  amount: Number(div.amount || info.amount || 0)
                 });
               }
             }
           } else {
-            const exDateStr = info.exDividendDate;
-            const payDateStr = info.paymentDate;
+            const exDateStr = normalizeDateStr(info.exDividendDate || stock.exDividendDate);
+            const payDateStr = normalizeDateStr(info.paymentDate || stock.paymentDate);
 
             if (exDateStr === todayStr) {
               eventsToNotify.push({
                 type: 'ex-dividend',
-                amount: info.amount || 0
+                amount: Number(info.amount || 0)
               });
             }
             if (payDateStr === todayStr) {
               eventsToNotify.push({
                 type: 'payment',
-                amount: info.amount || 0
+                amount: Number(info.amount || 0)
               });
             }
           }
 
           for (const evt of eventsToNotify) {
-            const dedupDocId = `${userId}_${symbol}_${evt.type}_${todayStr}`;
+            const dedupDocId = `notify_${chatId}_${symbol}_${evt.type}_${todayStr}`;
+            if (sentKeysInMemory.has(dedupDocId)) {
+              console.log(`[Dividend Notify Dedup In-Memory] ${dedupDocId} already processed. Skipping.`);
+              continue;
+            }
+            sentKeysInMemory.add(dedupDocId);
+
             const logRef = adminDb.collection("dividend_notify_log").doc(dedupDocId);
             const logSnap = await logRef.get();
 
             if (logSnap.exists) {
-              console.log(`[Dividend Notify Dedup] ${dedupDocId} already notified. Skipping.`);
+              console.log(`[Dividend Notify Dedup DB] ${dedupDocId} already notified. Skipping.`);
               continue;
             }
 
@@ -719,18 +746,24 @@ async function startServer() {
       const chatsSnapshot = await adminDb.collection("telegram_chats").get();
       for (const chatDoc of chatsSnapshot.docs) {
         const chatData = chatDoc.data() || {};
-        const chatId = String(chatData.chatId || chatDoc.id);
+        const chatId = String(chatData.chatId || chatDoc.id).trim();
         if (processedChatIds.has(chatId)) continue;
-        const botToken = chatData.botToken || process.env.TELEGRAM_BOT_TOKEN || "";
-        const userStocks = chatData.stocks || [];
-        if (!chatId || !botToken || !Array.isArray(userStocks) || userStocks.length === 0) continue;
+        const botToken = (chatData.botToken || process.env.TELEGRAM_BOT_TOKEN || "").trim();
+        const rawStocks = chatData.stocks || [];
+        if (!chatId || !botToken || !Array.isArray(rawStocks) || rawStocks.length === 0) continue;
+
+        const stockMap = new Map<string, any>();
+        for (const s of rawStocks) {
+          if (s && s.symbol) stockMap.set(String(s.symbol).trim(), s);
+        }
+        const userStocks = Array.from(stockMap.values());
 
         for (const stock of userStocks) {
-          if (!stock || !stock.dividendInfo) continue;
-          const symbol = stock.symbol;
+          if (!stock) continue;
+          const symbol = String(stock.symbol).trim();
           const stockName = stock.name || symbol;
           const shares = Number(stock.shares) || 0;
-          const info = stock.dividendInfo;
+          const info = stock.dividendInfo || stock;
 
           const eventsToNotify: { type: 'ex-dividend' | 'payment'; amount: number }[] = [];
 
@@ -739,8 +772,8 @@ async function startServer() {
             const seenPay = new Set<string>();
 
             for (const div of info.history) {
-              const exDateStr = div.date;
-              let payDateStr = div.paymentDate || div.payDate;
+              const exDateStr = normalizeDateStr(div.date);
+              let payDateStr = normalizeDateStr(div.paymentDate || div.payDate);
 
               if (!payDateStr && exDateStr) {
                 const mEx = moment(exDateStr);
@@ -753,7 +786,7 @@ async function startServer() {
                 seenEx.add(exDateStr);
                 eventsToNotify.push({
                   type: 'ex-dividend',
-                  amount: div.amount || info.amount || 0
+                  amount: Number(div.amount || info.amount || 0)
                 });
               }
 
@@ -761,35 +794,41 @@ async function startServer() {
                 seenPay.add(payDateStr);
                 eventsToNotify.push({
                   type: 'payment',
-                  amount: div.amount || info.amount || 0
+                  amount: Number(div.amount || info.amount || 0)
                 });
               }
             }
           } else {
-            const exDateStr = info.exDividendDate;
-            const payDateStr = info.paymentDate;
+            const exDateStr = normalizeDateStr(info.exDividendDate || stock.exDividendDate);
+            const payDateStr = normalizeDateStr(info.paymentDate || stock.paymentDate);
 
             if (exDateStr === todayStr) {
               eventsToNotify.push({
                 type: 'ex-dividend',
-                amount: info.amount || 0
+                amount: Number(info.amount || 0)
               });
             }
             if (payDateStr === todayStr) {
               eventsToNotify.push({
                 type: 'payment',
-                amount: info.amount || 0
+                amount: Number(info.amount || 0)
               });
             }
           }
 
           for (const evt of eventsToNotify) {
-            const dedupDocId = `chat_${chatId}_${symbol}_${evt.type}_${todayStr}`;
+            const dedupDocId = `notify_${chatId}_${symbol}_${evt.type}_${todayStr}`;
+            if (sentKeysInMemory.has(dedupDocId)) {
+              console.log(`[Dividend Notify Dedup In-Memory] ${dedupDocId} already processed. Skipping.`);
+              continue;
+            }
+            sentKeysInMemory.add(dedupDocId);
+
             const logRef = adminDb.collection("dividend_notify_log").doc(dedupDocId);
             const logSnap = await logRef.get();
 
             if (logSnap.exists) {
-              console.log(`[Dividend Notify Dedup] ${dedupDocId} already notified. Skipping.`);
+              console.log(`[Dividend Notify Dedup DB] ${dedupDocId} already notified. Skipping.`);
               continue;
             }
 
@@ -838,21 +877,24 @@ async function startServer() {
   function startDividendNotifyScheduler() {
     console.log("[Scheduler] Dividend notification push scheduler started.");
     
-    // Check on startup after 5 seconds
+    // Check on startup after 5 seconds if hour is >= 8
     setTimeout(() => {
-      runDividendNotifyCore().catch(err => console.error("[Startup Dividend Notify Error]", err));
+      const taipeiTime = moment().tz("Asia/Taipei");
+      if (taipeiTime.hour() >= 8 && lastNotifyRunDate !== taipeiTime.format("YYYY-MM-DD")) {
+        lastNotifyRunDate = taipeiTime.format("YYYY-MM-DD");
+        runDividendNotifyCore().catch(err => console.error("[Startup Dividend Notify Error]", err));
+      }
     }, 5000);
 
     setInterval(async () => {
       try {
         const taipeiTime = moment().tz("Asia/Taipei");
         const todayStr = taipeiTime.format("YYYY-MM-DD");
-        const hourMinute = taipeiTime.format("HH:mm");
 
-        // Check if it's 8:00 AM (08:00) Taipei time and hasn't run today yet
-        if (hourMinute === "08:00" && lastNotifyRunDate !== todayStr) {
+        // Trigger if it's 8:00 AM or later Taipei time and hasn't run today yet
+        if (taipeiTime.hour() >= 8 && lastNotifyRunDate !== todayStr) {
           lastNotifyRunDate = todayStr;
-          console.log(`[Scheduler] It is 08:00 Taipei time (${todayStr}). Triggering dividend notifications...`);
+          console.log(`[Scheduler] It is ${taipeiTime.format("HH:mm")} Taipei time (${todayStr}). Triggering dividend notifications...`);
           await runDividendNotifyCore();
         }
       } catch (err: any) {
@@ -1036,22 +1078,8 @@ ${top10Json}
   let lastDailyPostRunDate = "";
 
   function startDailyPostScheduler() {
-    console.log("[Scheduler] Daily post draft scheduler started.");
-    setInterval(async () => {
-      try {
-        const taipeiTime = moment().tz("Asia/Taipei");
-        const todayStr = taipeiTime.format("YYYY-MM-DD");
-        const hourMinute = taipeiTime.format("HH:mm");
-
-        if (hourMinute === "14:30" && lastDailyPostRunDate !== todayStr) {
-          lastDailyPostRunDate = todayStr;
-          console.log(`[Scheduler] It is 14:30 Taipei time (${todayStr}). Triggering daily post draft generation...`);
-          await generateDailyPostCore();
-        }
-      } catch (err: any) {
-        console.error("[Scheduler Error] Error in daily post draft check:", err.message || err);
-      }
-    }, 60000);
+    console.log("[Scheduler] Daily post automatic push is PAUSED per user preference (manual trigger only).");
+    // Automatic timer disabled as requested. Users can trigger posts manually from Web UI or Telegram.
   }
 
   // Start the daily post draft scheduler
@@ -1276,9 +1304,17 @@ ${top10Json}
         `📊 *「我目前的資產現況與配置建議」*\n` +
         `💰 *「我現在有多少閒置現金？」*\n` +
         `📈 *「分析我的持股持倉」*\n` +
+        `✍️ *輸入 「/post」 或 「舒洪道」 即可手動要求生成舒洪道風格貼文！*\n` +
         `🎯 *「如何做好我的動態資產平衡？」*\n\n` +
         `直接在下方輸入區輸入您的問題，隨時看子彈到位、聽策略叮嚀！👇`;
       await sendTelegramMsg(botToken, chatId, welcomeText);
+      return;
+    }
+
+    // Manual Trigger Command for "舒洪道" Daily Post Draft
+    if (text.startsWith("/post") || text.includes("舒洪道") || text.includes("生成貼文") || text === "發文") {
+      await sendTelegramMsg(botToken, chatId, "✍️ 收到指示！正在為您生成「舒洪道」風格貼文草稿，請稍候...");
+      generateDailyPostCore().catch(err => console.error("[Manual Telegram Post Error]", err));
       return;
     }
 
@@ -1340,9 +1376,59 @@ ${top10Json}
               extra += `, 殖利率: ${yieldRate.toFixed(2)}%`;
             }
 
-            return `- ${name} (${s.symbol}): ${shares.toLocaleString()} 股, ${costText}${extra}${profitText}`;
+            let divInfoText = "";
+            const info = s.dividendInfo;
+            if (info) {
+              if (info.exDividendDate) divInfoText += `, 最新/下次除息日: ${info.exDividendDate}`;
+              if (info.amount) divInfoText += `, 最新單次配息: $${info.amount}元`;
+              if (info.paymentDate) divInfoText += `, 預計發放日: ${info.paymentDate}`;
+              if (info.history && Array.isArray(info.history) && info.history.length > 0) {
+                const historyList = info.history.slice(0, 6).map((h: any) => 
+                  `${h.date || h.year}(配息:$${h.amount}元${h.paymentDate ? ',付息:' + h.paymentDate : ''})`
+                ).join("; ");
+                divInfoText += `, 配息紀錄: [${historyList}]`;
+              }
+            }
+
+            return `- ${name} (${s.symbol}): ${shares.toLocaleString()} 股, ${costText}${extra}${divInfoText}${profitText}`;
           }).join("\n") + (isTruncated ? "\n... (省略其餘持股)" : "")
         : "目前持股列表中尚無持股數據（若您剛加入，可返回網頁重新加載以觸發最新的同步）。";
+
+      // 針對使用者提問抽取的即時個股數據 (例如使用者問「00881今年配息多少」)
+      const stockCodeMatches = text.match(/\b(00\d{2,4}|\d{4})\b/g);
+      let queriedStockInfo = "";
+      if (stockCodeMatches && stockCodeMatches.length > 0) {
+        const uniqueCodes = (Array.from(new Set(stockCodeMatches)) as string[]).slice(0, 3);
+        const fetchedList: string[] = [];
+        for (const code of uniqueCodes) {
+          try {
+            console.log(`[Telegram Query] Fetching live TWSE stock info for queried symbol: ${code}`);
+            const data = await fetchStockDataFromTwse(code);
+            if (data) {
+              let historyStr = "";
+              if (data.history && Array.isArray(data.history) && data.history.length > 0) {
+                historyStr = data.history.slice(0, 8).map((h: any) => 
+                  `  • ${h.year}年度/期別 (${h.date}): 配息 $${h.amount} 元${h.paymentDate ? ', 發放日: ' + h.paymentDate : ''}`
+                ).join("\n");
+              }
+              fetchedList.push(
+                `📌 提問個股【${data.name} (${data.symbol})】即時權威配息數據：\n` +
+                `- 當前股價: $${data.price} 元\n` +
+                `- 最新單次配息金額: $${data.amount} 元\n` +
+                `- 最新/下次除息日: ${data.exDate || '未定/已除息'}\n` +
+                `- 最新股息發放日: ${data.paymentDate || '未定'}\n` +
+                `- 預估殖利率: ${data.yield}%\n` +
+                (historyStr ? `- 歷年配息詳細紀錄：\n${historyStr}\n` : "")
+              );
+            }
+          } catch (e: any) {
+            console.warn(`[Telegram Query] Failed to fetch live data for ${code}:`, e.message || e);
+          }
+        }
+        if (fetchedList.length > 0) {
+          queriedStockInfo = `## 針對使用者提問抽取的即時公開數據（權威資料來源）\n` + fetchedList.join("\n") + "\n\n";
+        }
+      }
 
       const totalUnrealizedProfit = totalStockValue - totalStockCost;
       const totalProfitRate = totalStockCost > 0 ? ((totalUnrealizedProfit / totalStockCost) * 100).toFixed(2) : '0.00';
@@ -1355,11 +1441,18 @@ ${top10Json}
       const backgroundSection = `## 當前個人資產背景\n` +
         `📊 帳戶：${finalUsername} | 現金：$${cash.toLocaleString()} 元 | 股票總市值：$${Math.round(totalStockValue).toLocaleString()} 元 | 總資產：$${Math.round(totalAssets).toLocaleString()} 元\n` +
         profitSummaryText +
-        `持股明細：\n` +
+        queriedStockInfo +
+        `持股明細與股息紀錄：\n` +
         `${stocksSummary}\n\n`;
+
+      const currentDateStr = moment().tz("Asia/Taipei").format("YYYY-MM-DD");
+      const currentYearStr = moment().tz("Asia/Taipei").format("YYYY");
 
       const systemInstruction =
         `# Role: 息引力資產守護助理\n\n` +
+        `【重要時間與時空脈絡基準】\n` +
+        `今天是台北時間 ${currentDateStr}（當前年度為 ${currentYearStr} 年）。\n` +
+        `當使用者詢問「今年」、「最新」配息、歷史除息或股價數據時，請務必使用背景資料中提供的 ${currentYearStr} 年最新即時數據解答，嚴禁回答 2024 或 2025 年之前的舊歷史數據！\n\n` +
         `你是一位專業的股息投資組合分析師,服務對象是有 20+ 檔持股、關注股息現金流與台美股 AI 供應鏈的成熟投資人。\n\n` +
         `## 核心行為準則\n` +
         `- 使用純文字回覆,絕對禁止使用 * # _ 等 Markdown 符號,避免 Telegram 解析失敗\n` +
@@ -1425,6 +1518,7 @@ ${top10Json}
                 systemInstruction: systemInstruction,
                 temperature: 0.7,
                 maxOutputTokens: 2500,
+                tools: [{ googleSearch: {} }],
               },
             });
 
@@ -1737,6 +1831,16 @@ ${top10Json}
 
   // API: Daily "舒洪道" Style Post Draft Generation (Triggered daily at 14:30 Taipei time by Cloud Scheduler or internal timer)
   app.post("/api/cron/daily-post", apiKeyAuth, async (req, res) => {
+    const result = await generateDailyPostCore();
+    if (result && !result.success) {
+      return res.status(500).json(result);
+    }
+    return res.json(result || { success: true });
+  });
+
+  // API: User Manual Trigger for "舒洪道" Daily Post Draft Generation
+  app.post("/api/user/generate-daily-post", async (req, res) => {
+    console.log("[API] User requested manual generation of 舒洪道 post draft.");
     const result = await generateDailyPostCore();
     if (result && !result.success) {
       return res.status(500).json(result);

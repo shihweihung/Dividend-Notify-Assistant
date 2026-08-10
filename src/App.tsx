@@ -27,7 +27,8 @@ import {
   MessageSquare,
   ChevronsUpDown,
   Folder,
-  Layers
+  Layers,
+  Sparkles
 } from 'lucide-react';
 import { 
   PieChart as RechartsPieChart, 
@@ -2931,6 +2932,20 @@ function MainApp() {
                                             {stock.shares === 0 && (
                                               <span className="px-1.5 py-0.5 rounded-md bg-slate-500/20 text-slate-400 text-[8px] font-black shrink-0">已清倉</span>
                                             )}
+                                            {(() => {
+                                              const curPrice = stock.dividendInfo?.currentPrice || stock.currentPrice || 0;
+                                              if (stock.shares > 0 && stock.cost && stock.cost > 0 && curPrice > 0) {
+                                                const dropPct = (stock.cost - curPrice) / stock.cost;
+                                                if (dropPct >= 0.15) {
+                                                  return (
+                                                    <span className="px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[8px] font-black shrink-0 flex items-center gap-0.5 border border-amber-500/30 animate-pulse">
+                                                      ⚠️ 跌破成本 {(dropPct * 100).toFixed(0)}%
+                                                    </span>
+                                                  );
+                                                }
+                                              }
+                                              return null;
+                                            })()}
                                           </div>
 
                                           {/* Compact Summary shown when Card is Collapsed */}
@@ -3059,30 +3074,58 @@ function MainApp() {
                                                       </span>
                                                     )}
                                                   </div>
-                                                  {stock.dividendInfo.etfComponents && stock.dividendInfo.etfComponents.length > 0 ? (
-                                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
-                                                      {stock.dividendInfo.etfComponents.map((comp, idx) => (
-                                                        <div 
-                                                          key={idx}
-                                                          className={cn(
-                                                            "px-2 py-1 rounded-lg text-[10px] flex justify-between items-center",
-                                                            darkMode ? "bg-slate-900/60" : "bg-white"
-                                                          )}
-                                                        >
-                                                          <span className={cn("font-medium truncate mr-1", darkMode ? "text-slate-300" : "text-slate-700")}>
-                                                            {comp.name}
-                                                          </span>
-                                                          <span className="font-mono font-bold text-indigo-500 shrink-0">
-                                                            {comp.weight}%
-                                                          </span>
+                                                  {(() => {
+                                                    const comps = stock.dividendInfo.etfComponents || stock.dividendInfo.topComponents || [];
+                                                    if (comps.length > 0) {
+                                                      return (
+                                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
+                                                          {comps.map((comp: any, idx: number) => {
+                                                            const compSymbol = comp.symbol || comp.code;
+                                                            const weightVal = typeof comp.weight === 'number' 
+                                                              ? `${comp.weight}%` 
+                                                              : comp.weight?.toString().includes('%') 
+                                                                ? comp.weight 
+                                                                : `${comp.weight}%`;
+                                                            return (
+                                                              <div 
+                                                                key={idx}
+                                                                className={cn(
+                                                                  "px-2 py-1 rounded-lg text-[10px] flex justify-between items-center",
+                                                                  darkMode ? "bg-slate-900/60" : "bg-white"
+                                                                )}
+                                                              >
+                                                                <div className="flex items-center gap-1 min-w-0 mr-1">
+                                                                  <span className={cn("font-medium truncate", darkMode ? "text-slate-300" : "text-slate-700")}>
+                                                                    {comp.name}
+                                                                  </span>
+                                                                  {compSymbol && (
+                                                                    <span className="text-[9px] text-slate-400 font-mono shrink-0">
+                                                                      ({compSymbol})
+                                                                    </span>
+                                                                  )}
+                                                                </div>
+                                                                <span className="font-mono font-bold text-indigo-500 shrink-0">
+                                                                  {weightVal}
+                                                                </span>
+                                                              </div>
+                                                            );
+                                                          })}
                                                         </div>
-                                                      ))}
-                                                    </div>
-                                                  ) : (
-                                                    <div className="text-[10px] text-slate-400 text-center py-2 italic">
-                                                      暫無成分股權重資料
-                                                    </div>
-                                                  )}
+                                                      );
+                                                    }
+                                                    return (
+                                                      <div className="text-[10px] text-slate-400 text-center py-2 italic flex flex-col items-center gap-1">
+                                                        <span>暫無成分股權重資料</span>
+                                                        <button
+                                                          type="button"
+                                                          onClick={() => handleRefreshStock(stock)}
+                                                          className="text-indigo-500 underline text-[10px] hover:text-indigo-400 font-bold cursor-pointer"
+                                                        >
+                                                          點此重新整理資料
+                                                        </button>
+                                                      </div>
+                                                    );
+                                                  })()}
                                                 </div>
                                               </motion.div>
                                             )}

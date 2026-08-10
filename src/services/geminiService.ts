@@ -16,38 +16,49 @@ export async function fetchDividendData(symbol: string): Promise<DividendInfo | 
   }
 
   let topComponents: any[] = [];
-  const isEtf = twseData.symbol.startsWith('00') && (twseData.symbol.length >= 4 && twseData.symbol.length <= 6);
+  const isEtf = (twseData.symbol.startsWith('00') || cleanSymbol.startsWith('00')) && 
+                ((twseData.symbol.length >= 4 && twseData.symbol.length <= 6) || (cleanSymbol.length >= 4 && cleanSymbol.length <= 6));
 
   // 2. 如果是 ETF，從 MoneyDJ 抓成分股
   if (isEtf) {
     const etfUrl = `https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid=${twseData.symbol}.TW`;
     try {
       console.log(`[MoneyDJ] 正在抓取 ${twseData.symbol} 的成分股...`);
-      const etfRes = await axios.get(etfUrl, { timeout: 10000 });
+      const etfRes = await axios.get(etfUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        timeout: 10000
+      });
       
       const cheerio = await import('cheerio');
       const $ = cheerio.load(etfRes.data);
       
-      const rows = $('table tbody tr');
+      const rows = $('table tr');
       let count = 0;
       
       rows.each((i, el) => {
         const cells = $(el).find('td');
         if (cells.length === 3 && count < 10) {
           const nameCode = $(cells[0]).text().trim();
-          const weight = $(cells[1]).text().trim();
+          const weightText = $(cells[1]).text().trim().replace('%', '');
+          const weightNum = parseFloat(weightText);
           
           const match = nameCode.match(/(.*?)\((.*?)\)/);
-          if (match) {
+          if (match && !isNaN(weightNum)) {
+            const code = match[2].trim().replace('.TW', '').replace('.TWO', '');
             topComponents.push({
               name: match[1].trim(),
-              code: match[2].trim().replace('.TW', '').replace('.TWO', ''),
-              weight: weight + '%'
+              code: code,
+              symbol: code,
+              weight: weightNum
             });
             count++;
           }
         }
       });
+      console.log(`[MoneyDJ] 成功抓取 ${twseData.symbol} 的成分股 ${topComponents.length} 筆`);
     } catch (error) {
       console.error("[MoneyDJ] 取得成分股失敗，網址:", etfUrl, "錯誤:", error instanceof Error ? error.message : error);
     }
@@ -68,6 +79,8 @@ export async function fetchDividendData(symbol: string): Promise<DividendInfo | 
     yield: twseData.yield,
     isEtf: isEtf,
     topComponents: topComponents,
+    etfComponents: topComponents,
+    etfComponentsUpdatedAt: new Date().toISOString(),
     source: "HiStock & 證交所",
     sourceUrl: "https://histock.tw/",
     updatedAt: new Date().toISOString(),
