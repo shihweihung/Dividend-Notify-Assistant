@@ -102,8 +102,8 @@ service cloud.firestore {
     }
 
     match /market_data/{symbol} {
-      allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated();
+      allow read: if true;
+      allow create, update: if true;
     }
 
     match /telegram_chats/{chatId} {

@@ -28,7 +28,8 @@ import {
   ChevronsUpDown,
   Folder,
   Layers,
-  Sparkles
+  Sparkles,
+  Clock
 } from 'lucide-react';
 import { 
   PieChart as RechartsPieChart, 
@@ -105,6 +106,32 @@ const authenticatedFetch = async (url: string, options: RequestInit = {}) => {
     'Authorization': `Bearer ${token}`,
   };
   return fetch(url, { ...options, headers });
+};
+
+const formatUpdatedAt = (updatedAt: any) => {
+  if (!updatedAt) return null;
+  try {
+    let d: Date;
+    if (typeof updatedAt === 'string') {
+      d = new Date(updatedAt);
+    } else if (updatedAt && typeof updatedAt.toDate === 'function') {
+      d = updatedAt.toDate();
+    } else if (updatedAt instanceof Date) {
+      d = updatedAt;
+    } else {
+      d = new Date(updatedAt);
+    }
+    if (isNaN(d.getTime())) return null;
+    return d.toLocaleString('zh-TW', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+  } catch (e) {
+    return null;
+  }
 };
 
 export default function App() {
@@ -601,7 +628,7 @@ function MainApp() {
           }
         }
       } catch (e) {
-        handleFirestoreError(e, OperationType.GET, `market_data/${targetSymbol}`);
+        console.warn(`Cache read error for market_data/${targetSymbol}:`, e);
       }
 
       if (!info) {
@@ -619,7 +646,7 @@ function MainApp() {
               updatedAt: serverTimestamp()
             });
           } catch (e) {
-            handleFirestoreError(e, OperationType.WRITE, `market_data/${targetSymbol}`);
+            console.warn(`Cache write error for market_data/${targetSymbol}:`, e);
           }
         }
       }
@@ -845,6 +872,13 @@ function MainApp() {
   };
 
   const handleExportCSV = () => {
+    // Export active stocks (持股中)
+    const activeStocks = stocks.filter(stock => stock.shares > 0);
+    if (activeStocks.length === 0) {
+      alert("目前尚無持股中（未清倉）的股票可匯出。");
+      return;
+    }
+
     // CSV Header row with BOM to support Microsoft Excel Traditional Chinese encoding properly
     const headers = [
       '股票代號',
@@ -859,7 +893,7 @@ function MainApp() {
       '預估年收益率 (Yield %)'
     ];
 
-    const rows = stocks.map(stock => {
+    const rows = activeStocks.map(stock => {
       const symbol = stock.symbol;
       const displaySymbol = /^\d+$/.test(symbol) ? `\t${symbol}` : symbol;
       const name = stock.name;
@@ -947,17 +981,17 @@ function MainApp() {
                 updatedAt: serverTimestamp()
               });
             } catch (e) {
-              handleFirestoreError(e, OperationType.WRITE, `market_data/${stock.symbol}`);
+              console.warn(`Cache write error for market_data/${stock.symbol}:`, e);
             }
           }
 
           if (info) {
             if (user) {
               const stockRef = doc(db, 'users', user.uid, 'stocks', stock.symbol);
-              await updateDoc(stockRef, { 
+              await setDoc(stockRef, { 
                 dividendInfo: info,
                 updatedAt: serverTimestamp()
-              });
+              }, { merge: true });
             }
             updatedStocks[i] = { ...stock, dividendInfo: info };
           }
@@ -1001,16 +1035,16 @@ function MainApp() {
             updatedAt: serverTimestamp()
           });
         } catch (e) {
-          handleFirestoreError(e, OperationType.WRITE, `market_data/${stock.symbol}`);
+          console.warn(`Cache write error for market_data/${stock.symbol}:`, e);
         }
 
         // Update state/firestore
         if (user) {
           const stockRef = doc(db, 'users', user.uid, 'stocks', stock.symbol);
-          await updateDoc(stockRef, { 
+          await setDoc(stockRef, { 
             dividendInfo: info,
             updatedAt: serverTimestamp()
-          });
+          }, { merge: true });
         } else {
           setStocks(prev => prev.map(s => s.symbol === stock.symbol ? { ...s, dividendInfo: info } : s));
         }
@@ -2852,6 +2886,23 @@ function MainApp() {
                           <ChevronsUpDown className="w-3.5 h-3.5" />
                           <span>{collapsedStockCards.size >= filteredStocks.length ? "全部展開" : "全部收合"}</span>
                         </button>
+
+                        {/* Export CSV Button (Only for Active Stocks / Not in Sold tab) */}
+                        {stockFilterTab !== 'sold' && stocks.some(s => s.shares > 0) && (
+                          <button
+                            onClick={handleExportCSV}
+                            className={cn(
+                              "flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all border cursor-pointer shrink-0 shadow-xs",
+                              darkMode 
+                                ? "bg-slate-800 text-indigo-400 hover:bg-slate-700 border-slate-700" 
+                                : "bg-white text-indigo-600 border-slate-200 hover:bg-slate-50"
+                            )}
+                            title="匯出持股與領息預估 CSV 檔"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>匯出 CSV</span>
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -2918,7 +2969,7 @@ function MainApp() {
                                           onClick={() => toggleStockCardCollapse(stock.symbol)}
                                           className="flex-1 min-w-0 cursor-pointer flex items-center flex-wrap gap-x-2 gap-y-1"
                                         >
-                                          <div className="flex items-center gap-1.5 min-w-0">
+                                          <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
                                             <span className={cn(
                                               "text-sm font-black truncate",
                                               darkMode ? "text-slate-100" : "text-slate-800"
@@ -2926,6 +2977,14 @@ function MainApp() {
                                               {stock.name}
                                             </span>
                                             <span className="text-[10px] font-bold text-slate-400">{stock.symbol}</span>
+                                            
+                                            {/* 現價 Badge */}
+                                            {stock.dividendInfo?.currentPrice !== undefined && stock.dividendInfo?.currentPrice > 0 && (
+                                              <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-black font-mono shrink-0 border border-emerald-500/20">
+                                                現價 ${stock.dividendInfo.currentPrice.toLocaleString()}
+                                              </span>
+                                            )}
+
                                             {stock.dividendInfo?.isEtf && (
                                               <span className="px-1.5 py-0.5 rounded-md bg-indigo-500/10 text-indigo-500 text-[8px] font-black uppercase shrink-0">ETF</span>
                                             )}
@@ -2945,6 +3004,18 @@ function MainApp() {
                                                 }
                                               }
                                               return null;
+                                            })()}
+
+                                            {/* 最近更新時間 Badge */}
+                                            {(() => {
+                                              const updatedStr = formatUpdatedAt(stock.dividendInfo?.updatedAt);
+                                              if (!updatedStr) return null;
+                                              return (
+                                                <span className="text-[9px] font-medium text-slate-400 shrink-0 flex items-center gap-0.5 ml-auto sm:ml-0">
+                                                  <Clock className="w-2.5 h-2.5 text-slate-400" />
+                                                  <span>更新於 {updatedStr}</span>
+                                                </span>
+                                              );
                                             })()}
                                           </div>
 
@@ -3218,7 +3289,13 @@ function MainApp() {
                                               "p-2.5 sm:p-3 rounded-2xl space-y-2 transition-colors",
                                               darkMode ? "bg-slate-800/50 border border-slate-800" : "bg-slate-100/60 border border-slate-200/40"
                                             )}>
-                                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                                                <div>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">單位股價</p>
+                                                  <p className={cn("text-xs sm:text-sm font-black truncate text-emerald-600 dark:text-emerald-400")}>
+                                                    {stock.dividendInfo?.currentPrice ? `$${stock.dividendInfo.currentPrice.toLocaleString()}` : '—'}
+                                                  </p>
+                                                </div>
                                                 <div>
                                                   <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">現值</p>
                                                   <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
@@ -3367,6 +3444,16 @@ function MainApp() {
                                               </div>
                                             </div>
                                           ) : null}
+                                          {/* Stock Footer: Source & Last Updated */}
+                                          <div className="pt-2 mt-1 border-t flex items-center justify-between text-[9px] font-medium text-slate-400 dark:border-slate-800/80 border-slate-100">
+                                            <span>資料來源: {stock.dividendInfo?.source || '台灣證券交易所 / 自動同步'}</span>
+                                            {stock.dividendInfo?.updatedAt && (
+                                              <span className="flex items-center gap-1">
+                                                <Clock className="w-2.5 h-2.5" />
+                                                <span>最近更新: {formatUpdatedAt(stock.dividendInfo.updatedAt)}</span>
+                                              </span>
+                                            )}
+                                          </div>
                                         </div>
                                       )}
                                     </motion.div>
@@ -3424,7 +3511,7 @@ function MainApp() {
 
                   {/* Actions Header */}
                   <div className="flex items-center gap-2 shrink-0">
-                    {stocks.length > 0 && (
+                    {stockFilterTab !== 'sold' && stocks.some(s => s.shares > 0) && (
                       <button
                         onClick={handleExportCSV}
                         className={cn(
