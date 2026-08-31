@@ -11,6 +11,7 @@ import { fetchDividendData } from "./src/services/geminiService";
 import moment from "moment-timezone";
 import { GoogleGenAI } from "@google/genai";
 
+
 const __dirname = process.cwd();
 
 async function startServer() {

@@ -52,7 +52,7 @@ service cloud.firestore {
 
     // Domain Validators
     function isValidUserProfile(data) {
-      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'photoURL', 'lastLogin', 'role', 'cash', 'telegramBotToken', 'telegramChatId']) &&
+      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'photoURL', 'lastLogin', 'role', 'cash', 'telegramBotToken', 'telegramChatId', 'gptApiKey']) &&
              data.uid is string && data.uid.size() > 0 && data.uid.size() < 128 &&
              data.email is string && data.email.size() < 256 && isValidEmail(data.email) &&
              (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 100)) &&
@@ -61,14 +61,14 @@ service cloud.firestore {
              (!('role' in data) || (data.role is string && data.role in ['admin', 'user'])) &&
              (!('cash' in data) || (data.cash is number && data.cash >= 0)) &&
              (!('telegramBotToken' in data) || (data.telegramBotToken is string && data.telegramBotToken.size() < 200)) &&
-             (!('telegramChatId' in data) || (data.telegramChatId is string && data.telegramChatId.size() < 50));
+             (!('telegramChatId' in data) || (data.telegramChatId is string && data.telegramChatId.size() < 50)) &&
+             (!('gptApiKey' in data) || (data.gptApiKey is string && data.gptApiKey.size() < 128));
     }
 
     function isValidStock(data) {
-      return hasOnlyAllowedFields(['symbol', 'name', 'shares', 'cost', 'sellPrice', 'soldShares', 'currentPrice', 'priceUpdatedAt', 'dividendInfo', 'updatedAt', 'manualDividendAdjustment']) &&
-             data.symbol is string && data.symbol.size() > 0 && data.symbol.size() < 20 &&
-             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
-             data.shares is number && data.shares >= 0 &&
+      return (!('symbol' in data) || (data.symbol is string && data.symbol.size() > 0 && data.symbol.size() < 30)) &&
+             (!('name' in data) || (data.name is string && data.name.size() > 0 && data.name.size() < 120)) &&
+             (!('shares' in data) || (data.shares is number && data.shares >= 0)) &&
              (!('cost' in data) || data.cost == null || data.cost is number) &&
              (!('sellPrice' in data) || data.sellPrice == null || data.sellPrice is number) &&
              (!('soldShares' in data) || data.soldShares == null || data.soldShares is number) &&
@@ -102,8 +102,7 @@ service cloud.firestore {
     }
 
     match /market_data/{symbol} {
-      allow read: if true;
-      allow create, update: if true;
+      allow read, write: if true;
     }
 
     match /telegram_chats/{chatId} {

@@ -175,6 +175,7 @@ function MainApp() {
     return localStorage.getItem('telegram_chat_id') || '';
   });
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
+
   const [snapshots, setSnapshots] = useState<{ date: string; stocks: any[] }[]>([]);
   const [stockToDelete, setStockToDelete] = useState<{ symbol: string; name: string } | null>(null);
   const [stockFilterTab, setStockFilterTab] = useState<'all' | 'active' | 'sold'>('all');
@@ -467,6 +468,7 @@ function MainApp() {
           } else {
             setTelegramChatId('');
           }
+
         }
       }, (err) => {
         handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
@@ -845,10 +847,18 @@ function MainApp() {
       if (info) {
         if (user) {
           const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
-          await updateDoc(stockRef, { 
-            dividendInfo: info,
-            updatedAt: serverTimestamp()
-          });
+          const existingStock = stocks.find(s => s.symbol === symbol);
+          try {
+            await setDoc(stockRef, { 
+              symbol: symbol,
+              name: info.name || existingStock?.name || symbol,
+              shares: existingStock?.shares ?? 0,
+              dividendInfo: info,
+              updatedAt: serverTimestamp()
+            }, { merge: true });
+          } catch (e) {
+            handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/stocks/${symbol}`);
+          }
         } else {
           setStocks(stocks.map(s => s.symbol === symbol ? { ...s, dividendInfo: info } : s));
         }
@@ -988,10 +998,17 @@ function MainApp() {
           if (info) {
             if (user) {
               const stockRef = doc(db, 'users', user.uid, 'stocks', stock.symbol);
-              await setDoc(stockRef, { 
-                dividendInfo: info,
-                updatedAt: serverTimestamp()
-              }, { merge: true });
+              try {
+                await setDoc(stockRef, { 
+                  symbol: stock.symbol,
+                  name: stock.name || info.name || stock.symbol,
+                  shares: stock.shares ?? 0,
+                  dividendInfo: info,
+                  updatedAt: serverTimestamp()
+                }, { merge: true });
+              } catch (e) {
+                handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/stocks/${stock.symbol}`);
+              }
             }
             updatedStocks[i] = { ...stock, dividendInfo: info };
           }
@@ -1041,10 +1058,17 @@ function MainApp() {
         // Update state/firestore
         if (user) {
           const stockRef = doc(db, 'users', user.uid, 'stocks', stock.symbol);
-          await setDoc(stockRef, { 
-            dividendInfo: info,
-            updatedAt: serverTimestamp()
-          }, { merge: true });
+          try {
+            await setDoc(stockRef, { 
+              symbol: stock.symbol,
+              name: stock.name || info.name || stock.symbol,
+              shares: stock.shares ?? 0,
+              dividendInfo: info,
+              updatedAt: serverTimestamp()
+            }, { merge: true });
+          } catch (e) {
+            handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/stocks/${stock.symbol}`);
+          }
         } else {
           setStocks(prev => prev.map(s => s.symbol === stock.symbol ? { ...s, dividendInfo: info } : s));
         }
@@ -1588,6 +1612,8 @@ function MainApp() {
     }
   };
 
+
+
   const handleSendTelegramAlert = async () => {
     if (!telegramBotToken || !telegramChatId) {
       alert('請先在設定面板填寫正確的 Bot Token 與 Chat ID！');
@@ -1935,6 +1961,8 @@ function MainApp() {
                                 )} />
                               </div>
                             </button>
+
+
 
                             {/* Telegram Integration Settings */}
                             <div className={cn(
@@ -2932,7 +2960,7 @@ function MainApp() {
                                 </div>
                                 <div className="flex items-center gap-2">
                                   <span className="text-[10px] text-slate-400 font-mono font-medium">
-                                    市值: ${group.stocks.reduce((sum, s) => sum + ((s.dividendInfo?.currentPrice || 0) * s.shares), 0).toLocaleString()}
+                                    市值: ${group.stocks.reduce((sum, s) => sum + (((s.dividendInfo?.currentPrice || s.currentPrice || (s.dividendInfo as any)?.price || 0)) * s.shares), 0).toLocaleString()}
                                   </span>
                                   {isGroupCollapsed ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronUp className="w-4 h-4 text-slate-400" />}
                                 </div>
@@ -2944,7 +2972,8 @@ function MainApp() {
                               <div className="space-y-2">
                                 {group.stocks.map((stock) => {
                                   const isCardCollapsed = collapsedStockCards.has(stock.symbol);
-                                  const marketVal = (stock.dividendInfo?.currentPrice || 0) * stock.shares;
+                                  const curPrice = stock.dividendInfo?.currentPrice || stock.currentPrice || (stock.dividendInfo as any)?.price || 0;
+                                  const marketVal = curPrice * stock.shares;
                                   const costVal = (stock.cost || 0) * stock.shares;
                                   const unrealizedPnl = marketVal - costVal;
 
@@ -2978,10 +3007,21 @@ function MainApp() {
                                             </span>
                                             <span className="text-[10px] font-bold text-slate-400">{stock.symbol}</span>
                                             
+                                            {/* 最近更新時間 (緊鄰代號) */}
+                                            {(() => {
+                                              const updatedStr = formatUpdatedAt(stock.dividendInfo?.updatedAt);
+                                              if (!updatedStr) return null;
+                                              return (
+                                                <span className="text-[9px] font-normal text-slate-400 dark:text-slate-500 shrink-0">
+                                                  ({updatedStr})
+                                                </span>
+                                              );
+                                            })()}
+                                            
                                             {/* 現價 Badge */}
-                                            {stock.dividendInfo?.currentPrice !== undefined && stock.dividendInfo?.currentPrice > 0 && (
+                                            {curPrice > 0 && (
                                               <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-black font-mono shrink-0 border border-emerald-500/20">
-                                                現價 ${stock.dividendInfo.currentPrice.toLocaleString()}
+                                                現價 ${curPrice.toLocaleString()}
                                               </span>
                                             )}
 
@@ -2992,7 +3032,6 @@ function MainApp() {
                                               <span className="px-1.5 py-0.5 rounded-md bg-slate-500/20 text-slate-400 text-[8px] font-black shrink-0">已清倉</span>
                                             )}
                                             {(() => {
-                                              const curPrice = stock.dividendInfo?.currentPrice || stock.currentPrice || 0;
                                               if (stock.shares > 0 && stock.cost && stock.cost > 0 && curPrice > 0) {
                                                 const dropPct = (stock.cost - curPrice) / stock.cost;
                                                 if (dropPct >= 0.15) {
@@ -3005,18 +3044,6 @@ function MainApp() {
                                               }
                                               return null;
                                             })()}
-
-                                            {/* 最近更新時間 Badge */}
-                                            {(() => {
-                                              const updatedStr = formatUpdatedAt(stock.dividendInfo?.updatedAt);
-                                              if (!updatedStr) return null;
-                                              return (
-                                                <span className="text-[9px] font-medium text-slate-400 shrink-0 flex items-center gap-0.5 ml-auto sm:ml-0">
-                                                  <Clock className="w-2.5 h-2.5 text-slate-400" />
-                                                  <span>更新於 {updatedStr}</span>
-                                                </span>
-                                              );
-                                            })()}
                                           </div>
 
                                           {/* Compact Summary shown when Card is Collapsed */}
@@ -3026,6 +3053,11 @@ function MainApp() {
                                                 <>
                                                   <span className="text-slate-400">{stock.shares.toLocaleString()}股</span>
                                                   <span className="text-indigo-500">${Math.round(marketVal).toLocaleString()}</span>
+                                                  {curPrice > 0 && (
+                                                    <span className="text-emerald-600 dark:text-emerald-400">
+                                                      (${curPrice.toLocaleString()}/股)
+                                                    </span>
+                                                  )}
                                                   {stock.cost && stock.cost > 0 && (
                                                     <span className={unrealizedPnl >= 0 ? "text-rose-500" : "text-emerald-500"}>
                                                       {unrealizedPnl >= 0 ? '+' : ''}${Math.round(unrealizedPnl).toLocaleString()}
@@ -3035,6 +3067,11 @@ function MainApp() {
                                               ) : (
                                                 <>
                                                   <span className="text-slate-400">賣出{soldShares.toLocaleString()}股</span>
+                                                  {curPrice > 0 && (
+                                                    <span className="text-emerald-600 dark:text-emerald-400">
+                                                      現價 ${curPrice.toLocaleString()}
+                                                    </span>
+                                                  )}
                                                   {sellPrice > 0 && cost > 0 && (
                                                     <span className={realizedPnl >= 0 ? "text-rose-500" : "text-emerald-500"}>
                                                       {realizedPnl >= 0 ? '+' : ''}${Math.round(realizedPnl).toLocaleString()}
@@ -3291,15 +3328,15 @@ function MainApp() {
                                             )}>
                                               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                                                 <div>
-                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">單位股價</p>
+                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">最新股價</p>
                                                   <p className={cn("text-xs sm:text-sm font-black truncate text-emerald-600 dark:text-emerald-400")}>
-                                                    {stock.dividendInfo?.currentPrice ? `$${stock.dividendInfo.currentPrice.toLocaleString()}` : '—'}
+                                                    {curPrice > 0 ? `$${curPrice.toLocaleString()}` : '—'}
                                                   </p>
                                                 </div>
                                                 <div>
                                                   <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">現值</p>
                                                   <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
-                                                    ${((stock.dividendInfo?.currentPrice || 0) * stock.shares).toLocaleString()}
+                                                    ${(curPrice * stock.shares).toLocaleString()}
                                                   </p>
                                                 </div>
                                                 <div>
@@ -3713,6 +3750,8 @@ function MainApp() {
             </div>
           )}
         </AnimatePresence>
+
+
       </main>
       <style>{`
         .custom-scrollbar::-webkit-scrollbar {
