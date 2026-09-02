@@ -1,5 +1,8 @@
 {
   "name": "息引力",
   "description": "最優雅的台股股息追蹤與提醒工具，幫您精準抓取除息日與發放日。",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

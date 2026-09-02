@@ -1015,17 +1015,42 @@ ${top10Json}
       }
 
       try {
-        const ai = new GoogleGenAI({ apiKey });
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: systemPromptTemplate,
+        const ai = new GoogleGenAI({ 
+          apiKey,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            }
+          }
         });
 
-        const generatedText = response.text ? response.text.trim() : "";
+        // Use gemini-flash-lite-latest (strictly Flash / Flash-Lite models, never Pro)
+        const draftModelsToTry = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash"];
+        let generatedText = "";
+
+        for (const modelName of draftModelsToTry) {
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: systemPromptTemplate,
+            });
+
+            generatedText = response.text ? response.text.trim() : "";
+            if (generatedText) {
+              console.log(`[Daily Post] Successfully generated post using model: ${modelName}`);
+              break;
+            }
+          } catch (modelErr: any) {
+            console.warn(`[Daily Post] Model ${modelName} failed, retrying next Flash candidate:`, modelErr.message || modelErr);
+          }
+        }
+
         if (generatedText) {
           const fullMsg = `📝 今日貼文草稿(舒洪道)：\n\n${generatedText}`;
           await sendTelegramMsg(botToken, chatId, fullMsg);
           console.log(`[Daily Post] Successfully sent daily post draft to ChatID ${chatId}`);
+        } else {
+          console.error(`[Daily Post Error] All Flash model candidates failed for ChatID ${chatId}`);
         }
       } catch (genErr: any) {
         console.error(`[Daily Post Gemini Error] ChatID ${chatId}:`, genErr.message || genErr);
@@ -1504,7 +1529,8 @@ ${top10Json}
 
       console.log(`[Process] About to call Gemini for ChatID ${chatId}`);
       let response;
-      const modelsToTry = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-pro"];
+      // Strictly Flash / Flash-Lite models only (never Pro models to avoid billing/quota issues)
+      const modelsToTry = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash"];
       let lastErr: any = null;
 
       for (const modelName of modelsToTry) {
