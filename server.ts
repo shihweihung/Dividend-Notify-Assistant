@@ -1087,11 +1087,20 @@ ${top10Json}
         let generatedText = "";
 
         for (const modelName of draftModelsToTry) {
+          let timeoutId: NodeJS.Timeout | undefined = undefined;
           try {
-            const response = await ai.models.generateContent({
+            const apiCallPromise = ai.models.generateContent({
               model: modelName,
               contents: systemPromptTemplate,
             });
+
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              timeoutId = setTimeout(() => {
+                reject(new Error("Gemini API call timed out after 20 seconds"));
+              }, 20000);
+            });
+
+            const response = await Promise.race([apiCallPromise, timeoutPromise]);
 
             generatedText = response.text ? response.text.trim() : "";
             if (generatedText) {
@@ -1100,6 +1109,10 @@ ${top10Json}
             }
           } catch (modelErr: any) {
             console.warn(`[Daily Post] Model ${modelName} failed, retrying next Flash candidate:`, modelErr.message || modelErr);
+          } finally {
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+            }
           }
         }
 
