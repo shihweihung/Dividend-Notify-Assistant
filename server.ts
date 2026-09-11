@@ -39,6 +39,11 @@ async function startServer() {
     }
   }
 
+  function normalizeSymbol(sym: any): string {
+    if (!sym) return '';
+    return String(sym).trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
+  }
+
   // Initialize Firebase Admin dynamically securely connected to Firestore
   const fbConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
   let adminDb: any = null;
@@ -197,7 +202,8 @@ async function startServer() {
     }
   }
 
-  app.use(express.json());
+  app.use(express.json({ limit: "25mb" }));
+  app.use(express.urlencoded({ limit: "25mb", extended: true }));
 
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
@@ -637,21 +643,37 @@ async function startServer() {
         const stocksSnapshot = await adminDb.collection("users").doc(userId).collection("stocks").get();
         const rawStocks = stocksSnapshot.docs.map((d: any) => d.data());
         
-        // Deduplicate stocks array by symbol to avoid processing duplicate stock entries
+        // Deduplicate stocks array by normalized symbol to avoid processing duplicate stock entries
         const stockMap = new Map<string, any>();
         for (const s of rawStocks) {
-          if (s && s.symbol) stockMap.set(String(s.symbol).trim(), s);
+          if (!s || !s.symbol) continue;
+          const cleanSym = normalizeSymbol(s.symbol);
+          if (!cleanSym) continue;
+          if (!stockMap.has(cleanSym)) {
+            stockMap.set(cleanSym, { ...s, symbol: cleanSym });
+          } else {
+            const existing = stockMap.get(cleanSym)!;
+            stockMap.set(cleanSym, {
+              ...existing,
+              symbol: cleanSym,
+              shares: Math.max(Number(existing.shares) || 0, Number(s.shares) || 0),
+              cost: existing.cost || s.cost,
+              dividendInfo: existing.dividendInfo || s.dividendInfo,
+              name: (existing.name && existing.name !== cleanSym) ? existing.name : (s.name || cleanSym)
+            });
+          }
         }
         const userStocks = Array.from(stockMap.values());
 
         for (const stock of userStocks) {
           if (!stock) continue;
-          const symbol = String(stock.symbol).trim();
-          const stockName = stock.name || symbol;
+          const symbol = normalizeSymbol(stock.symbol);
+          if (!symbol) continue;
+          const stockName = (stock.name && stock.name !== symbol) ? stock.name : symbol;
           const shares = Number(stock.shares) || 0;
           const info = stock.dividendInfo || stock;
 
-          const eventsToNotify: { type: 'ex-dividend' | 'payment'; amount: number }[] = [];
+          const eventsToNotify: { type: 'ex-dividend' | 'payment'; amount: number; exDateStr?: string }[] = [];
 
           if (info.history && Array.isArray(info.history) && info.history.length > 0) {
             const seenEx = new Set<string>();
@@ -672,7 +694,8 @@ async function startServer() {
                 seenEx.add(exDateStr);
                 eventsToNotify.push({
                   type: 'ex-dividend',
-                  amount: Number(div.amount || info.amount || 0)
+                  amount: Number(div.amount || info.amount || 0),
+                  exDateStr
                 });
               }
 
@@ -680,7 +703,8 @@ async function startServer() {
                 seenPay.add(payDateStr);
                 eventsToNotify.push({
                   type: 'payment',
-                  amount: Number(div.amount || info.amount || 0)
+                  amount: Number(div.amount || info.amount || 0),
+                  exDateStr
                 });
               }
             }
@@ -691,13 +715,15 @@ async function startServer() {
             if (exDateStr === todayStr) {
               eventsToNotify.push({
                 type: 'ex-dividend',
-                amount: Number(info.amount || 0)
+                amount: Number(info.amount || 0),
+                exDateStr
               });
             }
             if (payDateStr === todayStr) {
               eventsToNotify.push({
                 type: 'payment',
-                amount: Number(info.amount || 0)
+                amount: Number(info.amount || 0),
+                exDateStr
               });
             }
           }
@@ -718,11 +744,27 @@ async function startServer() {
               continue;
             }
 
+            let effectiveShares = shares;
+            if (evt.type === 'payment' && evt.exDateStr) {
+              try {
+                const snapsRef = adminDb.collection("users").doc(userId).collection("snapshots");
+                const snapDocs = await snapsRef.where("date", "<=", evt.exDateStr).orderBy("date", "desc").limit(1).get();
+                if (!snapDocs.empty) {
+                  const targetStock = snapDocs.docs[0].data().stocks?.find((s: any) => s.symbol && normalizeSymbol(s.symbol) === symbol);
+                  if (targetStock && targetStock.shares !== undefined) {
+                    effectiveShares = Number(targetStock.shares);
+                  }
+                }
+              } catch (snapErr) {
+                console.warn(`[Snapshot Lookup Warning] Failed to fetch exDate snapshot for ${symbol}:`, snapErr);
+              }
+            }
+
             let msgText = "";
             if (evt.type === 'ex-dividend') {
               msgText = `📅 今天是 ${stockName}(${symbol}) 的除息日！每股 $${evt.amount}`;
             } else {
-              const totalEst = Math.round(evt.amount * shares);
+              const totalEst = Math.round(evt.amount * effectiveShares);
               msgText = `💰 今天是 ${stockName}(${symbol}) 的領息日！預計入帳 $${totalEst.toLocaleString()}`;
             }
 
@@ -755,14 +797,30 @@ async function startServer() {
 
         const stockMap = new Map<string, any>();
         for (const s of rawStocks) {
-          if (s && s.symbol) stockMap.set(String(s.symbol).trim(), s);
+          if (!s || !s.symbol) continue;
+          const cleanSym = normalizeSymbol(s.symbol);
+          if (!cleanSym) continue;
+          if (!stockMap.has(cleanSym)) {
+            stockMap.set(cleanSym, { ...s, symbol: cleanSym });
+          } else {
+            const existing = stockMap.get(cleanSym)!;
+            stockMap.set(cleanSym, {
+              ...existing,
+              symbol: cleanSym,
+              shares: Math.max(Number(existing.shares) || 0, Number(s.shares) || 0),
+              cost: existing.cost || s.cost,
+              dividendInfo: existing.dividendInfo || s.dividendInfo,
+              name: (existing.name && existing.name !== cleanSym) ? existing.name : (s.name || cleanSym)
+            });
+          }
         }
         const userStocks = Array.from(stockMap.values());
 
         for (const stock of userStocks) {
           if (!stock) continue;
-          const symbol = String(stock.symbol).trim();
-          const stockName = stock.name || symbol;
+          const symbol = normalizeSymbol(stock.symbol);
+          if (!symbol) continue;
+          const stockName = (stock.name && stock.name !== symbol) ? stock.name : symbol;
           const shares = Number(stock.shares) || 0;
           const info = stock.dividendInfo || stock;
 
@@ -1322,6 +1380,48 @@ ${top10Json}
       return;
     }
 
+    // Check if user uploaded a photo/screenshot via Telegram
+    if (msg.photo && Array.isArray(msg.photo) && msg.photo.length > 0) {
+      try {
+        await sendTelegramMsg(botToken, chatId, "📷 收到您的券商持股截圖！「息引力」 Gemini AI 正在為您分析圖片中的持股與張數...");
+        const largestPhoto = msg.photo[msg.photo.length - 1];
+        const fileRes = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${largestPhoto.file_id}`);
+        const fileData = await fileRes.json();
+
+        if (fileData.ok && fileData.result?.file_path) {
+          const imgUrl = `https://api.telegram.org/file/bot${botToken}/${fileData.result.file_path}`;
+          const imgFetch = await fetch(imgUrl);
+          const arrayBuffer = await imgFetch.arrayBuffer();
+          const base64Img = Buffer.from(arrayBuffer).toString('base64');
+          const ext = fileData.result.file_path.split('.').pop() || 'png';
+          const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
+
+          const parsed = await parsePortfolioScreenshotWithGemini(base64Img, mimeType);
+          
+          if (parsed.parsedStocks && parsed.parsedStocks.length > 0) {
+            let summaryText = `🎉 *「息引力」AI 截圖解析完成！*\n\n共成功辨識出 ${parsed.parsedStocks.length} 檔持股：\n`;
+            
+            for (const item of parsed.parsedStocks) {
+              const sharesStr = Number(item.shares || 0).toLocaleString();
+              const costStr = item.cost ? `$${item.cost}` : '未顯示';
+              summaryText += `• *${item.symbol} ${item.name || ''}*: ${sharesStr} 股 (成本: ${costStr})\n`;
+            }
+
+            summaryText += `\n💡 提示：請至「息引力」網頁介面使用「📷 AI 截圖匯入」，或直接將持股寫入資料庫！🚀`;
+            await sendTelegramMsg(botToken, chatId, summaryText);
+            return;
+          } else {
+            await sendTelegramMsg(botToken, chatId, "😅 截圖解析完成，但未能明確辨識出股票代號與股數，請確認截圖是否清晰或包含完整的股票庫存資訊。");
+            return;
+          }
+        }
+      } catch (photoErr: any) {
+        console.error("[Telegram Photo OCR Error]", photoErr);
+        await sendTelegramMsg(botToken, chatId, `⚠️ 截圖解析發生錯誤：${photoErr.message || '無法讀取圖片'}`);
+        return;
+      }
+    }
+
     // Welcome/start command
     if (text.startsWith("/start")) {
       const welcomeText = `🎉 恭喜連線成功，${finalUsername}！\n\n` +
@@ -1835,6 +1935,139 @@ ${top10Json}
     } catch (error) {
       console.error("Server-side Gemini error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "AI 查詢失敗" });
+    }
+  });
+
+  // Helper: Gemini Vision OCR for Portfolio Screenshots
+  async function parsePortfolioScreenshotWithGemini(imageBase64: string, mimeType: string = "image/png") {
+    const apiKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("伺服器尚未設定 AI 金鑰，請聯繫管理員。");
+    }
+
+    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, "");
+    const { GoogleGenAI } = await import("@google/genai");
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
+
+    const prompt = `你是一位精通台灣股市與各大券商 APP（例如：元大證券、國泰樹精靈、富邦 e 點通、永豐金隨身證券、三竹股市、國泰 CUBE、Firstrade 等）庫存畫面辨識的 AI 專家。
+請仔細辨識這張券商持股/庫存截圖，精準提取出所有股票或 ETF 的持股資料：
+
+請務必精準判斷以下欄位：
+1. "symbol": 股票或 ETF 代號（例如："0056", "2330", "00878", "00919", "00929"；若為美股請填美股代碼）。
+2. "name": 股票或 ETF 名稱（例如："元大高股息", "台積電", "國泰永續高股息"）。
+3. "shares": 持有股數（⚠️ 特別注意：若畫面單位顯示「張」，請務必轉換為「股數」，1 張 = 1000 股！例如 15 張請填 15000；若顯示「股」或無單位數字，請填數字）。
+4. "cost": 平均成本單價（若畫面有顯示均價/買價請填數字；若無顯示填 null）。
+5. "currentPrice": 現價/成交價（若畫面有顯示請填數字；若無顯示填 null）。
+
+請只回傳合法的 JSON 格式，不要加入任何 Markdown 標記，格式範例如下：
+{
+  "parsedStocks": [
+    {
+      "symbol": "0056",
+      "name": "元大高股息",
+      "shares": 15000,
+      "cost": 38.5,
+      "currentPrice": 54.6
+    }
+  ],
+  "note": "成功辨識出 1 檔持股"
+}`;
+
+    const modelsToTry = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash"];
+    let resultText = "";
+    let lastErr: any = null;
+
+    for (const m of modelsToTry) {
+      try {
+        const response = await ai.models.generateContent({
+          model: m,
+          contents: [
+            {
+              inlineData: {
+                mimeType: mimeType || "image/png",
+                data: cleanBase64
+              }
+            },
+            prompt
+          ],
+          config: {
+            responseMimeType: "application/json"
+          }
+        });
+        if (response.text) {
+          resultText = response.text;
+          break;
+        }
+      } catch (e) {
+        lastErr = e;
+        console.warn(`[Screenshot OCR] Model ${m} failed, trying next...`, e);
+      }
+    }
+
+    if (!resultText) {
+      throw lastErr || new Error("AI 截圖解析無回應");
+    }
+
+    const cleanJsonStr = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const parsedData = JSON.parse(cleanJsonStr);
+
+    const rawList = Array.isArray(parsedData.parsedStocks) ? parsedData.parsedStocks : [];
+    const stockMap = new Map<string, any>();
+    for (const item of rawList) {
+      if (!item || !item.symbol) continue;
+      const cleanSym = String(item.symbol).trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
+      if (!cleanSym) continue;
+      if (!stockMap.has(cleanSym)) {
+        stockMap.set(cleanSym, {
+          ...item,
+          symbol: cleanSym
+        });
+      } else {
+        const existing = stockMap.get(cleanSym);
+        stockMap.set(cleanSym, {
+          ...existing,
+          shares: Math.max(existing.shares || 0, item.shares || 0),
+          cost: existing.cost && existing.cost > 0 ? existing.cost : item.cost,
+          currentPrice: existing.currentPrice && existing.currentPrice > 0 ? existing.currentPrice : item.currentPrice,
+          name: existing.name || item.name
+        });
+      }
+    }
+
+    const uniqueList = Array.from(stockMap.values());
+
+    return {
+      parsedStocks: uniqueList,
+      note: parsedData.note || `成功辨識出 ${uniqueList.length} 檔持股`
+    };
+  }
+
+  // API: AI Parse Portfolio Screenshot
+  app.post("/api/parse-portfolio-screenshot", firebaseAuth, async (req, res) => {
+    try {
+      const { imageBase64, mimeType } = req.body || {};
+      if (!imageBase64) {
+        return res.status(400).json({ error: "請上傳或提供截圖圖片內容" });
+      }
+
+      const result = await parsePortfolioScreenshotWithGemini(imageBase64, mimeType || "image/png");
+      return res.json({
+        success: true,
+        parsedStocks: result.parsedStocks,
+        note: result.note
+      });
+    } catch (err: any) {
+      console.error("[Screenshot OCR Endpoint Error]", err);
+      return res.status(500).json({
+        error: err.message || "截圖解析失敗，請確認圖片清晰度後重試。"
+      });
     }
   });
 

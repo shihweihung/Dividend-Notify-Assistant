@@ -46,3 +46,51 @@ export type CalendarEvent = {
   symbol: string;
   amount?: number;
 }
+
+export function normalizeSymbol(sym: string): string {
+  if (!sym) return '';
+  return sym.toString().trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
+}
+
+export function deduplicateStocks(stocks: StockEntry[]): { uniqueStocks: StockEntry[]; duplicatesToRemove: string[] } {
+  const map = new Map<string, StockEntry>();
+  const duplicatesToRemove: string[] = [];
+
+  for (const stock of stocks) {
+    if (!stock || !stock.symbol) continue;
+    const cleanSym = normalizeSymbol(stock.symbol);
+
+    if (!map.has(cleanSym)) {
+      map.set(cleanSym, {
+        ...stock,
+        symbol: cleanSym
+      });
+    } else {
+      const existing = map.get(cleanSym)!;
+      // Mark duplicate symbol to remove from DB if it differs or if it's a second record
+      duplicatesToRemove.push(stock.symbol);
+
+      const mergedShares = (existing.shares > 0 && stock.shares > 0)
+        ? Math.max(existing.shares, stock.shares)
+        : (existing.shares || stock.shares);
+
+      const mergedCost = existing.cost && existing.cost > 0 ? existing.cost : stock.cost;
+      const mergedDividendInfo = existing.dividendInfo?.amount ? existing.dividendInfo : (stock.dividendInfo || existing.dividendInfo);
+      const mergedName = (existing.name && existing.name !== cleanSym) ? existing.name : (stock.name || cleanSym);
+
+      map.set(cleanSym, {
+        ...existing,
+        symbol: cleanSym,
+        name: mergedName,
+        shares: mergedShares,
+        ...(mergedCost ? { cost: mergedCost } : {}),
+        dividendInfo: mergedDividendInfo
+      });
+    }
+  }
+
+  return {
+    uniqueStocks: Array.from(map.values()),
+    duplicatesToRemove
+  };
+}

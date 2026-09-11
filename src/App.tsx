@@ -29,8 +29,10 @@ import {
   Folder,
   Layers,
   Sparkles,
-  Clock
+  Clock,
+  Camera
 } from 'lucide-react';
+import { AIScreenshotModal } from './components/AIScreenshotModal';
 import { 
   PieChart as RechartsPieChart, 
   Pie, 
@@ -68,7 +70,7 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 // 移除直接引用伺服器端服務，改用 API 呼叫以避免瀏覽器端編譯錯誤
 // import { fetchDividendData } from './services/geminiService';
-import type { StockEntry, CalendarEvent, DividendInfo } from './types';
+import { type StockEntry, type CalendarEvent, type DividendInfo, normalizeSymbol, deduplicateStocks } from './types';
 import { 
   auth, 
   db, 
@@ -175,6 +177,7 @@ function MainApp() {
     return localStorage.getItem('telegram_chat_id') || '';
   });
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
+  const [isScreenshotModalOpen, setIsScreenshotModalOpen] = useState(false);
 
   const [snapshots, setSnapshots] = useState<{ date: string; stocks: any[] }[]>([]);
   const [stockToDelete, setStockToDelete] = useState<{ symbol: string; name: string } | null>(null);
@@ -208,7 +211,8 @@ function MainApp() {
   }, []);
 
   const filteredStocks = useMemo(() => {
-    return stocks.filter(stock => {
+    const { uniqueStocks } = deduplicateStocks(stocks);
+    return uniqueStocks.filter(stock => {
       if (stockFilterTab === 'active') return stock.shares > 0;
       if (stockFilterTab === 'sold') return stock.shares === 0;
       return true;
@@ -426,9 +430,21 @@ function MainApp() {
 
     if (user) {
       const stocksRef = collection(db, 'users', user.uid, 'stocks');
-      const unsubscribe = onSnapshot(stocksRef, (snapshot) => {
+      const unsubscribe = onSnapshot(stocksRef, async (snapshot) => {
         const firestoreStocks = snapshot.docs.map(doc => doc.data() as StockEntry);
-        setStocks(firestoreStocks);
+        const { uniqueStocks, duplicatesToRemove } = deduplicateStocks(firestoreStocks);
+        setStocks(uniqueStocks);
+
+        if (duplicatesToRemove.length > 0) {
+          console.log(`[Deduplicate] Found ${duplicatesToRemove.length} duplicate stock docs, cleaning up...`, duplicatesToRemove);
+          for (const dupSym of duplicatesToRemove) {
+            try {
+              await deleteDoc(doc(db, 'users', user.uid, 'stocks', dupSym));
+            } catch (err) {
+              console.warn(`Error deleting duplicate stock doc ${dupSym}:`, err);
+            }
+          }
+        }
       }, (err) => {
         handleFirestoreError(err, OperationType.LIST, `users/${user.uid}/stocks`);
       });
@@ -437,7 +453,9 @@ function MainApp() {
     } else {
       const saved = localStorage.getItem('taiwan_stocks');
       if (saved) {
-        setStocks(JSON.parse(saved));
+        const raw = JSON.parse(saved);
+        const { uniqueStocks } = deduplicateStocks(raw);
+        setStocks(uniqueStocks);
       } else {
         setStocks([]);
       }
@@ -608,7 +626,7 @@ function MainApp() {
 
   const handleAddStock = async (e: React.FormEvent) => {
     e.preventDefault();
-    const targetSymbol = newSymbol.trim().toUpperCase();
+    const targetSymbol = normalizeSymbol(newSymbol);
     if (!targetSymbol) return;
 
     setIsLoading(true);
@@ -654,22 +672,24 @@ function MainApp() {
       }
 
       if (info) {
+        const cleanSym = normalizeSymbol(info.symbol || targetSymbol);
+        const normalizedInfo = { ...info, symbol: cleanSym };
         const stockData: StockEntry = { 
-          symbol: info.symbol, 
+          symbol: cleanSym, 
           name: info.name, 
           shares: newShares || 0, 
           ...(newCost > 0 ? { cost: newCost } : {}),
-          dividendInfo: info
+          dividendInfo: normalizedInfo
         };
 
         if (user) {
-          const stockRef = doc(db, 'users', user.uid, 'stocks', info.symbol);
+          const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
           try {
             const firestorePayload: any = {
-              symbol: info.symbol,
+              symbol: cleanSym,
               name: info.name,
               shares: newShares || 0,
-              dividendInfo: info,
+              dividendInfo: normalizedInfo,
               updatedAt: serverTimestamp()
             };
             if (newCost > 0) {
@@ -677,11 +697,11 @@ function MainApp() {
             }
             await setDoc(stockRef, firestorePayload);
           } catch (e) {
-            handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/stocks/${info.symbol}`);
+            handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/stocks/${cleanSym}`);
             throw e; // Re-throw to be caught by the outer catch block
           }
         } else {
-          const existingIndex = stocks.findIndex(s => s.symbol === info.symbol);
+          const existingIndex = stocks.findIndex(s => normalizeSymbol(s.symbol) === cleanSym);
           if (existingIndex >= 0) {
             const updatedStocks = [...stocks];
             updatedStocks[existingIndex] = stockData;
@@ -713,70 +733,168 @@ function MainApp() {
     }
   };
 
-  const handleRemoveStock = async (symbol: string) => {
-    if (user) {
-      const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
-      try {
-        await deleteDoc(stockRef);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `users/${user.uid}/stocks/${symbol}`);
+  const handleApplyScreenshotStocks = async (
+    parsedItems: { symbol: string; name: string; shares: number; cost: number | null }[],
+    mode: 'merge' | 'replace' | 'add'
+  ) => {
+    setIsLoading(true);
+    try {
+      let updatedStocksList = [...stocks];
+
+      if (mode === 'replace') {
+        if (user) {
+          for (const oldStock of stocks) {
+            try {
+              await deleteDoc(doc(db, 'users', user.uid, 'stocks', oldStock.symbol));
+            } catch (e) {
+              console.warn(`Error deleting old stock ${oldStock.symbol}:`, e);
+            }
+          }
+        }
+        updatedStocksList = [];
       }
-    } else {
-      setStocks(stocks.filter(s => s.symbol !== symbol));
+
+      for (const item of parsedItems) {
+        const symbol = normalizeSymbol(item.symbol);
+        if (!symbol) continue;
+        let existingStock = updatedStocksList.find(s => normalizeSymbol(s.symbol) === symbol);
+        let dividendInfo: DividendInfo | null = existingStock?.dividendInfo || null;
+
+        if (!dividendInfo) {
+          try {
+            const cacheRef = doc(db, 'market_data', symbol);
+            const cacheSnap = await getDoc(cacheRef);
+            if (cacheSnap.exists() && cacheSnap.data()?.info) {
+              dividendInfo = cacheSnap.data().info;
+            } else {
+              const res = await authenticatedFetch(`/api/dividend/${encodeURIComponent(symbol)}`);
+              if (res.ok) {
+                dividendInfo = await res.json();
+                if (dividendInfo) {
+                  await setDoc(cacheRef, { info: dividendInfo, updatedAt: serverTimestamp() }).catch(console.warn);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn(`Could not fetch dividend info for OCR stock ${symbol}:`, e);
+          }
+        }
+
+        let finalShares = item.shares;
+        if (mode === 'add' && existingStock) {
+          finalShares += existingStock.shares;
+        }
+
+        const finalCost = item.cost !== null && item.cost > 0 ? item.cost : (existingStock?.cost || undefined);
+        const name = item.name || dividendInfo?.name || existingStock?.name || symbol;
+
+        const newStockEntry: StockEntry = {
+          symbol,
+          name,
+          shares: finalShares,
+          ...(finalCost ? { cost: finalCost } : {}),
+          ...(dividendInfo ? { dividendInfo } : {})
+        };
+
+        if (user) {
+          const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
+          const payload: any = {
+            symbol,
+            name,
+            shares: finalShares,
+            updatedAt: serverTimestamp()
+          };
+          if (finalCost) payload.cost = finalCost;
+          if (dividendInfo) payload.dividendInfo = dividendInfo;
+          await setDoc(stockRef, payload, { merge: true });
+        }
+
+        const idx = updatedStocksList.findIndex(s => normalizeSymbol(s.symbol) === symbol);
+        if (idx >= 0) {
+          updatedStocksList[idx] = newStockEntry;
+        } else {
+          updatedStocksList.push(newStockEntry);
+        }
+      }
+
+      setStocks(updatedStocksList);
+      alert(`🎉 成功自動寫入 ${parsedItems.length} 檔持股！股息與市值數據已自動同步。`);
+    } catch (err: any) {
+      console.error('Error applying screenshot stocks:', err);
+      throw err;
+    } finally {
+      setIsLoading(false);
     }
   };
 
+  const handleRemoveStock = async (symbol: string) => {
+    const cleanSym = normalizeSymbol(symbol);
+    if (user) {
+      const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
+      try {
+        await deleteDoc(stockRef);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `users/${user.uid}/stocks/${cleanSym}`);
+      }
+    }
+    setStocks(prev => prev.filter(s => normalizeSymbol(s.symbol) !== cleanSym));
+  };
+
   const handleUpdateShares = async (symbol: string, shares: number) => {
-    const currentStock = stocks.find(s => s.symbol === symbol);
+    const cleanSym = normalizeSymbol(symbol);
+    const currentStock = stocks.find(s => normalizeSymbol(s.symbol) === cleanSym);
     const updateObj: { shares: number; soldShares?: number } = { shares };
     if (shares === 0 && currentStock && currentStock.shares > 0) {
       if (!currentStock.soldShares) {
         updateObj.soldShares = currentStock.shares;
       }
     }
-    setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, ...updateObj } : s));
+    setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, ...updateObj, symbol: cleanSym } : s));
     if (user) {
-      const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
+      const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
       try {
         await setDoc(stockRef, updateObj, { merge: true });
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${symbol}`);
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${cleanSym}`);
       }
     }
   };
 
   const handleUpdateCost = async (symbol: string, cost: number) => {
-    setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, cost } : s));
+    const cleanSym = normalizeSymbol(symbol);
+    setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, cost, symbol: cleanSym } : s));
     if (user) {
-      const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
+      const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
       try {
         await setDoc(stockRef, { cost }, { merge: true });
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${symbol}`);
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${cleanSym}`);
       }
     }
   };
 
   const handleUpdateSellPrice = async (symbol: string, sellPrice: number) => {
-    setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, sellPrice } : s));
+    const cleanSym = normalizeSymbol(symbol);
+    setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, sellPrice, symbol: cleanSym } : s));
     if (user) {
-      const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
+      const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
       try {
         await setDoc(stockRef, { sellPrice }, { merge: true });
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${symbol}`);
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${cleanSym}`);
       }
     }
   };
 
   const handleUpdateSoldShares = async (symbol: string, soldShares: number) => {
-    setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, soldShares } : s));
+    const cleanSym = normalizeSymbol(symbol);
+    setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, soldShares, symbol: cleanSym } : s));
     if (user) {
-      const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
+      const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
       try {
         await setDoc(stockRef, { soldShares }, { merge: true });
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${symbol}`);
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${cleanSym}`);
       }
     }
   };
@@ -1761,6 +1879,22 @@ function MainApp() {
                 </h1>
               </div>
               <div className="flex gap-2 items-center relative">
+                {/* AI Screenshot Import Capsule Button */}
+                <button
+                  onClick={() => setIsScreenshotModalOpen(true)}
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 py-1.5 rounded-full shadow-md active:scale-95 transition-all text-xs font-extrabold cursor-pointer border shrink-0",
+                    darkMode
+                      ? "bg-gradient-to-r from-indigo-900/90 to-purple-900/90 border-indigo-700/60 text-indigo-200 hover:from-indigo-800 hover:to-purple-800"
+                      : "bg-gradient-to-r from-indigo-600 to-purple-600 border-indigo-500 text-white hover:opacity-95"
+                  )}
+                  title="上傳券商截圖由 AI 自動判斷持股"
+                >
+                  <Camera className="w-4 h-4 text-amber-300" />
+                  <span className="hidden sm:inline">AI 截圖匯入</span>
+                  <Sparkles className="w-3 h-3 text-amber-300" />
+                </button>
+
                 <button 
                   onClick={handleRefreshAll}
                   disabled={isLoading || stocks.length === 0}
@@ -1785,7 +1919,7 @@ function MainApp() {
                         ? "bg-indigo-700 text-white ring-2 ring-indigo-500/50" 
                         : "bg-indigo-600 text-white hover:bg-indigo-700"
                     )}
-                    title="新增股票"
+                    title="手動新增股票"
                   >
                     <Plus className="w-5 h-5" />
                   </button>
@@ -1817,6 +1951,21 @@ function MainApp() {
                               關閉
                             </button>
                           </div>
+
+                          {/* Quick AI Screenshot option */}
+                          <button
+                            onClick={() => {
+                              setShowAddForm(false);
+                              setIsScreenshotModalOpen(true);
+                            }}
+                            className="w-full mb-3 p-2.5 rounded-xl border border-indigo-200 dark:border-indigo-900/60 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-950/40 dark:to-purple-950/40 text-indigo-600 dark:text-indigo-300 hover:opacity-90 transition-all flex items-center justify-between text-xs font-extrabold cursor-pointer shadow-xs"
+                          >
+                            <span className="flex items-center gap-1.5">
+                              <Camera className="w-4 h-4 text-indigo-500" />
+                              <span>📷 上傳券商截圖，AI 自動判斷填入</span>
+                            </span>
+                            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                          </button>
 
                           <div className="space-y-3">
                             <div className="relative">
@@ -2825,14 +2974,14 @@ function MainApp() {
                   <div>
                     {/* Filter Tabs & Grouping Controls Top Bar */}
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-                      {/* Filter Tabs */}
-                      <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 w-fit">
+                      {/* Line 1 (Mobile): Filter Tabs */}
+                      <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 w-fit shrink-0">
                         <button
                           onClick={() => setStockFilterTab('all')}
                           className={cn(
                             "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
                             stockFilterTab === 'all' 
-                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-xs" : "bg-white text-indigo-600 shadow-xs") 
                               : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                           )}
                         >
@@ -2843,7 +2992,7 @@ function MainApp() {
                           className={cn(
                             "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
                             stockFilterTab === 'active' 
-                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-xs" : "bg-white text-indigo-600 shadow-xs") 
                               : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                           )}
                         >
@@ -2854,7 +3003,7 @@ function MainApp() {
                           className={cn(
                             "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
                             stockFilterTab === 'sold' 
-                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-sm" : "bg-white text-indigo-600 shadow-sm") 
+                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-xs" : "bg-white text-indigo-600 shadow-xs") 
                               : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                           )}
                         >
@@ -2862,10 +3011,10 @@ function MainApp() {
                         </button>
                       </div>
 
-                      {/* Grouping & Collapse Controls */}
-                      <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+                      {/* Line 2 (Mobile): Grouping on Left, Quick Actions on Right */}
+                      <div className="flex items-center justify-between sm:justify-end gap-2 w-full sm:w-auto">
                         {/* Grouping Mode */}
-                        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 text-[11px] font-bold">
+                        <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 text-[11px] font-bold w-fit shrink-0">
                           <span className="text-slate-400 px-1 text-[10px]">分組:</span>
                           <button
                             onClick={() => setStockGrouping('none')}
@@ -2902,35 +3051,38 @@ function MainApp() {
                           </button>
                         </div>
 
-                        {/* Collapse/Expand All Button */}
-                        <button
-                          onClick={handleToggleAllCardsCollapse}
-                          className={cn(
-                            "flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all border cursor-pointer shrink-0",
-                            darkMode ? "bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
-                          )}
-                          title="切換全部卡片展開/收合"
-                        >
-                          <ChevronsUpDown className="w-3.5 h-3.5" />
-                          <span>{collapsedStockCards.size >= filteredStocks.length ? "全部展開" : "全部收合"}</span>
-                        </button>
-
-                        {/* Export CSV Button (Only for Active Stocks / Not in Sold tab) */}
-                        {stockFilterTab !== 'sold' && stocks.some(s => s.shares > 0) && (
+                        {/* Quick Actions (Collapse/Expand All + Export CSV) */}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {/* Collapse/Expand All Button */}
                           <button
-                            onClick={handleExportCSV}
+                            onClick={handleToggleAllCardsCollapse}
                             className={cn(
-                              "flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all border cursor-pointer shrink-0 shadow-xs",
-                              darkMode 
-                                ? "bg-slate-800 text-indigo-400 hover:bg-slate-700 border-slate-700" 
-                                : "bg-white text-indigo-600 border-slate-200 hover:bg-slate-50"
+                              "flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all border cursor-pointer shrink-0 shadow-2xs",
+                              darkMode ? "bg-slate-800/80 text-slate-300 border-slate-700/80 hover:bg-slate-700" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
                             )}
-                            title="匯出持股與領息預估 CSV 檔"
+                            title="切換全部卡片展開/收合"
                           >
-                            <Download className="w-3.5 h-3.5" />
-                            <span>匯出 CSV</span>
+                            <ChevronsUpDown className="w-3.5 h-3.5" />
+                            <span>{collapsedStockCards.size >= filteredStocks.length ? "展開" : "收合"}</span>
                           </button>
-                        )}
+
+                          {/* Export CSV Button */}
+                          {stockFilterTab !== 'sold' && stocks.some(s => s.shares > 0) && (
+                            <button
+                              onClick={handleExportCSV}
+                              className={cn(
+                                "flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold transition-all border cursor-pointer shrink-0 shadow-2xs",
+                                darkMode 
+                                  ? "bg-slate-800/80 text-indigo-400 hover:bg-slate-700 border-slate-700/80" 
+                                  : "bg-white text-indigo-600 border-slate-200 hover:bg-slate-50"
+                              )}
+                              title="匯出持股與領息預估 CSV 檔"
+                            >
+                              <Download className="w-3.5 h-3.5 text-indigo-500" />
+                              <span>CSV</span>
+                            </button>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -3053,11 +3205,6 @@ function MainApp() {
                                                 <>
                                                   <span className="text-slate-400">{stock.shares.toLocaleString()}股</span>
                                                   <span className="text-indigo-500">${Math.round(marketVal).toLocaleString()}</span>
-                                                  {curPrice > 0 && (
-                                                    <span className="text-emerald-600 dark:text-emerald-400">
-                                                      (${curPrice.toLocaleString()}/股)
-                                                    </span>
-                                                  )}
                                                   {stock.cost && stock.cost > 0 && (
                                                     <span className={unrealizedPnl >= 0 ? "text-rose-500" : "text-emerald-500"}>
                                                       {unrealizedPnl >= 0 ? '+' : ''}${Math.round(unrealizedPnl).toLocaleString()}
@@ -3067,11 +3214,6 @@ function MainApp() {
                                               ) : (
                                                 <>
                                                   <span className="text-slate-400">賣出{soldShares.toLocaleString()}股</span>
-                                                  {curPrice > 0 && (
-                                                    <span className="text-emerald-600 dark:text-emerald-400">
-                                                      現價 ${curPrice.toLocaleString()}
-                                                    </span>
-                                                  )}
                                                   {sellPrice > 0 && cost > 0 && (
                                                     <span className={realizedPnl >= 0 ? "text-rose-500" : "text-emerald-500"}>
                                                       {realizedPnl >= 0 ? '+' : ''}${Math.round(realizedPnl).toLocaleString()}
@@ -3326,13 +3468,7 @@ function MainApp() {
                                               "p-2.5 sm:p-3 rounded-2xl space-y-2 transition-colors",
                                               darkMode ? "bg-slate-800/50 border border-slate-800" : "bg-slate-100/60 border border-slate-200/40"
                                             )}>
-                                              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                                                <div>
-                                                  <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">最新股價</p>
-                                                  <p className={cn("text-xs sm:text-sm font-black truncate text-emerald-600 dark:text-emerald-400")}>
-                                                    {curPrice > 0 ? `$${curPrice.toLocaleString()}` : '—'}
-                                                  </p>
-                                                </div>
+                                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                                                 <div>
                                                   <p className="text-[9px] sm:text-[10px] font-bold text-slate-400 uppercase">現值</p>
                                                   <p className={cn("text-xs sm:text-sm font-black truncate", darkMode ? "text-slate-200" : "text-slate-800")}>
@@ -3546,23 +3682,7 @@ function MainApp() {
                     </div>
                   </div>
 
-                  {/* Actions Header */}
-                  <div className="flex items-center gap-2 shrink-0">
-                    {stockFilterTab !== 'sold' && stocks.some(s => s.shares > 0) && (
-                      <button
-                        onClick={handleExportCSV}
-                        className={cn(
-                          "flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] sm:text-xs font-bold transition-all active:scale-95 shadow-xs border cursor-pointer shrink-0",
-                          darkMode 
-                            ? "bg-slate-700 text-indigo-400 hover:bg-slate-600 border-slate-600/50" 
-                            : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100 border-indigo-100/50"
-                        )}
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span className="whitespace-nowrap">匯出 CSV</span>
-                      </button>
-                    )}
-                  </div>
+
                 </div>
 
                 {/* Financial Metrics Grid */}
@@ -3751,6 +3871,14 @@ function MainApp() {
           )}
         </AnimatePresence>
 
+        {/* AI Screenshot Import Modal */}
+        <AIScreenshotModal
+          isOpen={isScreenshotModalOpen}
+          onClose={() => setIsScreenshotModalOpen(false)}
+          darkMode={darkMode}
+          authenticatedFetch={authenticatedFetch}
+          onApplyStocks={handleApplyScreenshotStocks}
+        />
 
       </main>
       <style>{`
