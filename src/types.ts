@@ -52,24 +52,40 @@ export function normalizeSymbol(sym: string): string {
   return sym.toString().trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
 }
 
-export function deduplicateStocks(stocks: StockEntry[]): { uniqueStocks: StockEntry[]; duplicatesToRemove: string[] } {
+export function deduplicateStocks<T extends StockEntry & { _docId?: string }>(stocks: T[]): {
+  uniqueStocks: StockEntry[];
+  duplicatesToRemove: string[];
+  mergedSurvivingStocks: StockEntry[];
+} {
   const map = new Map<string, StockEntry>();
+  const mergedSymbols = new Set<string>();
   const duplicatesToRemove: string[] = [];
+  const seenDocIds = new Set<string>();
 
   for (const stock of stocks) {
     if (!stock || !stock.symbol) continue;
     const cleanSym = normalizeSymbol(stock.symbol);
+    const docId = stock._docId || stock.symbol;
 
     if (!map.has(cleanSym)) {
       map.set(cleanSym, {
         ...stock,
         symbol: cleanSym
       });
+      seenDocIds.add(cleanSym);
+      if (docId !== cleanSym) {
+        duplicatesToRemove.push(docId);
+        mergedSymbols.add(cleanSym);
+      }
     } else {
-      const existing = map.get(cleanSym)!;
-      // Mark duplicate symbol to remove from DB if it differs or if it's a second record
-      duplicatesToRemove.push(stock.symbol);
+      mergedSymbols.add(cleanSym);
+      if (docId !== cleanSym || seenDocIds.has(docId)) {
+        duplicatesToRemove.push(docId);
+      } else {
+        seenDocIds.add(docId);
+      }
 
+      const existing = map.get(cleanSym)!;
       const mergedShares = (existing.shares > 0 && stock.shares > 0)
         ? Math.max(existing.shares, stock.shares)
         : (existing.shares || stock.shares);
@@ -89,8 +105,12 @@ export function deduplicateStocks(stocks: StockEntry[]): { uniqueStocks: StockEn
     }
   }
 
+  const uniqueStocks = Array.from(map.values());
+  const mergedSurvivingStocks = uniqueStocks.filter(s => mergedSymbols.has(s.symbol));
+
   return {
-    uniqueStocks: Array.from(map.values()),
-    duplicatesToRemove
+    uniqueStocks,
+    duplicatesToRemove: Array.from(new Set(duplicatesToRemove)),
+    mergedSurvivingStocks
   };
 }

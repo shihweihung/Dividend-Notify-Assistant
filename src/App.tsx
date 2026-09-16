@@ -431,18 +431,51 @@ function MainApp() {
     if (user) {
       const stocksRef = collection(db, 'users', user.uid, 'stocks');
       const unsubscribe = onSnapshot(stocksRef, async (snapshot) => {
-        const firestoreStocks = snapshot.docs.map(doc => doc.data() as StockEntry);
-        const { uniqueStocks, duplicatesToRemove } = deduplicateStocks(firestoreStocks);
+        const firestoreStocks = snapshot.docs.map(doc => ({
+          ...(doc.data() as StockEntry),
+          _docId: doc.id
+        }));
+        const { uniqueStocks, duplicatesToRemove, mergedSurvivingStocks } = deduplicateStocks(firestoreStocks);
         setStocks(uniqueStocks);
 
         if (duplicatesToRemove.length > 0) {
-          console.log(`[Deduplicate] Found ${duplicatesToRemove.length} duplicate stock docs, cleaning up...`, duplicatesToRemove);
-          for (const dupSym of duplicatesToRemove) {
+          console.log(`[Deduplicate] Found ${duplicatesToRemove.length} duplicate stock docs, updating surviving stocks & cleaning up...`, duplicatesToRemove);
+          
+          let allMergedSavedSuccessfully = true;
+          for (const mergedStock of mergedSurvivingStocks) {
             try {
-              await deleteDoc(doc(db, 'users', user.uid, 'stocks', dupSym));
-            } catch (err) {
-              console.warn(`Error deleting duplicate stock doc ${dupSym}:`, err);
+              const stockRef = doc(db, 'users', user.uid, 'stocks', mergedStock.symbol);
+              const payload: any = {
+                symbol: mergedStock.symbol,
+                name: mergedStock.name,
+                shares: mergedStock.shares,
+                updatedAt: serverTimestamp()
+              };
+              if (mergedStock.cost !== undefined && mergedStock.cost !== null) {
+                payload.cost = mergedStock.cost;
+              }
+              if (mergedStock.dividendInfo) {
+                payload.dividendInfo = mergedStock.dividendInfo;
+              }
+              await setDoc(stockRef, payload, { merge: true });
+              console.log(`[Deduplicate] Successfully updated surviving stock ${mergedStock.symbol} in Firestore`);
+            } catch (saveErr) {
+              allMergedSavedSuccessfully = false;
+              console.error(`[Deduplicate Error] Failed to update surviving stock ${mergedStock.symbol}:`, saveErr);
             }
+          }
+
+          if (allMergedSavedSuccessfully) {
+            for (const dupSym of duplicatesToRemove) {
+              try {
+                await deleteDoc(doc(db, 'users', user.uid, 'stocks', dupSym));
+                console.log(`[Deduplicate] Deleted duplicate doc ${dupSym}`);
+              } catch (err) {
+                console.warn(`Error deleting duplicate stock doc ${dupSym}:`, err);
+              }
+            }
+          } else {
+            console.warn(`[Deduplicate Warning] Skipping deletion of duplicate docs because saving merged surviving stocks failed.`);
           }
         }
       }, (err) => {
@@ -739,25 +772,17 @@ function MainApp() {
   ) => {
     setIsLoading(true);
     try {
-      let updatedStocksList = [...stocks];
+      const currentStocks = [...stocks];
+      let workingStocksList = [...stocks];
 
-      if (mode === 'replace') {
-        if (user) {
-          for (const oldStock of stocks) {
-            try {
-              await deleteDoc(doc(db, 'users', user.uid, 'stocks', oldStock.symbol));
-            } catch (e) {
-              console.warn(`Error deleting old stock ${oldStock.symbol}:`, e);
-            }
-          }
-        }
-        updatedStocksList = [];
-      }
+      const successfulItems: { symbol: string; name: string; entry: StockEntry }[] = [];
+      const failedItems: { symbol: string; error: string }[] = [];
 
       for (const item of parsedItems) {
         const symbol = normalizeSymbol(item.symbol);
         if (!symbol) continue;
-        let existingStock = updatedStocksList.find(s => normalizeSymbol(s.symbol) === symbol);
+
+        let existingStock = workingStocksList.find(s => normalizeSymbol(s.symbol) === symbol);
         let dividendInfo: DividendInfo | null = existingStock?.dividendInfo || null;
 
         if (!dividendInfo) {
@@ -797,31 +822,103 @@ function MainApp() {
         };
 
         if (user) {
-          const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
-          const payload: any = {
-            symbol,
-            name,
-            shares: finalShares,
-            updatedAt: serverTimestamp()
-          };
-          if (finalCost) payload.cost = finalCost;
-          if (dividendInfo) payload.dividendInfo = dividendInfo;
-          await setDoc(stockRef, payload, { merge: true });
-        }
+          try {
+            const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
+            const payload: any = {
+              symbol,
+              name,
+              shares: finalShares,
+              updatedAt: serverTimestamp()
+            };
+            if (finalCost) payload.cost = finalCost;
+            if (dividendInfo) payload.dividendInfo = dividendInfo;
 
-        const idx = updatedStocksList.findIndex(s => normalizeSymbol(s.symbol) === symbol);
-        if (idx >= 0) {
-          updatedStocksList[idx] = newStockEntry;
+            await setDoc(stockRef, payload, { merge: true });
+            successfulItems.push({ symbol, name, entry: newStockEntry });
+
+            const idx = workingStocksList.findIndex(s => normalizeSymbol(s.symbol) === symbol);
+            if (idx >= 0) {
+              workingStocksList[idx] = newStockEntry;
+            } else {
+              workingStocksList.push(newStockEntry);
+            }
+          } catch (itemErr: any) {
+            console.error(`Error saving stock ${symbol} to Firestore:`, itemErr);
+            failedItems.push({ symbol, error: itemErr?.message || '寫入失敗' });
+          }
         } else {
-          updatedStocksList.push(newStockEntry);
+          successfulItems.push({ symbol, name, entry: newStockEntry });
+          const idx = workingStocksList.findIndex(s => normalizeSymbol(s.symbol) === symbol);
+          if (idx >= 0) {
+            workingStocksList[idx] = newStockEntry;
+          } else {
+            workingStocksList.push(newStockEntry);
+          }
         }
       }
 
-      setStocks(updatedStocksList);
-      alert(`🎉 成功自動寫入 ${parsedItems.length} 檔持股！股息與市值數據已自動同步。`);
+      if (failedItems.length > 0) {
+        const successSymbols = successfulItems.map(i => i.symbol).join(', ');
+        const failureDetails = failedItems.map(f => `- ${f.symbol}: ${f.error}`).join('\n');
+        
+        let msg = `⚠️ 持股寫入部分失敗：\n\n`;
+        if (successfulItems.length > 0) {
+          msg += `✅ 成功寫入 ${successfulItems.length} 檔 (${successSymbols})\n`;
+        } else {
+          msg += `❌ 成功 0 檔\n`;
+        }
+        msg += `❌ 失敗 ${failedItems.length} 檔：\n${failureDetails}\n\n`;
+        msg += `已完整保留所有原有持股資料，未進行刪除。`;
+
+        alert(msg);
+
+        if (successfulItems.length > 0) {
+          if (mode === 'replace') {
+            const updatedMap = new Map<string, StockEntry>();
+            for (const s of currentStocks) {
+              updatedMap.set(normalizeSymbol(s.symbol), s);
+            }
+            for (const item of successfulItems) {
+              updatedMap.set(normalizeSymbol(item.symbol), item.entry);
+            }
+            setStocks(Array.from(updatedMap.values()));
+          } else {
+            setStocks(workingStocksList);
+          }
+        }
+      } else {
+        if (mode === 'replace') {
+          const successfulSymbolsSet = new Set(successfulItems.map(i => normalizeSymbol(i.symbol)));
+          const oldStocksToDelete = currentStocks.filter(s => !successfulSymbolsSet.has(normalizeSymbol(s.symbol)));
+
+          if (user) {
+            for (const oldStock of oldStocksToDelete) {
+              const oldSym = normalizeSymbol(oldStock.symbol);
+              try {
+                await deleteDoc(doc(db, 'users', user.uid, 'stocks', oldSym));
+              } catch (delErr) {
+                console.warn(`Error deleting old stock ${oldSym} during replace mode:`, delErr);
+              }
+            }
+          }
+
+          const finalReplaceList = successfulItems.map(i => i.entry);
+          setStocks(finalReplaceList);
+          if (!user) {
+            localStorage.setItem('taiwan_stocks', JSON.stringify(finalReplaceList));
+          }
+          alert(`🎉 成功取代並更新 ${successfulItems.length} 檔持股！舊持股已清空，股息數據已同步。`);
+        } else {
+          setStocks(workingStocksList);
+          if (!user) {
+            localStorage.setItem('taiwan_stocks', JSON.stringify(workingStocksList));
+          }
+          alert(`🎉 成功寫入 ${successfulItems.length} 檔持股！股息與市值數據已自動同步。`);
+        }
+      }
     } catch (err: any) {
       console.error('Error applying screenshot stocks:', err);
-      throw err;
+      alert(`套用截圖持股時發生錯誤: ${err?.message || err}`);
     } finally {
       setIsLoading(false);
     }
