@@ -72,7 +72,7 @@ export function deduplicateStocks<T extends StockEntry & { _docId?: string }>(st
         ...stock,
         symbol: cleanSym
       });
-      seenDocIds.add(cleanSym);
+      seenDocIds.add(docId);
       if (docId !== cleanSym) {
         duplicatesToRemove.push(docId);
         mergedSymbols.add(cleanSym);
