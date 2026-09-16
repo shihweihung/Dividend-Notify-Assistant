@@ -546,14 +546,85 @@ async function startServer() {
         await b.commit();
       }
 
+      // Step 4b: Take snapshots of portfolio values for standalone telegram_chats
+      let telegramSnapshotsCreated = 0;
+      let telegramSnapshotsSkipped = 0;
+
+      const tgSnapshotBatches: any[] = [];
+      let currentTgSnapshotBatch = adminDb.batch();
+      let tgSnapshotBatchOpCount = 0;
+      tgSnapshotBatches.push(currentTgSnapshotBatch);
+
+      try {
+        const chatsSnapshot = await adminDb.collection("telegram_chats").get();
+        for (const chatDoc of chatsSnapshot.docs) {
+          const chatData = chatDoc.data() || {};
+          const stocks = chatData.stocks;
+          if (!Array.isArray(stocks) || stocks.length === 0) {
+            continue;
+          }
+
+          try {
+            const snapshotRef = adminDb.collection("telegram_chats").doc(chatDoc.id).collection("snapshots").doc(todayStr);
+            const existingSnapshotDoc = await snapshotRef.get();
+
+            if (existingSnapshotDoc.exists) {
+              const existingData = existingSnapshotDoc.data();
+              if (existingData && existingData.createdAt) {
+                let createdAtDate: Date;
+                if (existingData.createdAt.toDate) {
+                  createdAtDate = existingData.createdAt.toDate();
+                } else {
+                  createdAtDate = new Date(existingData.createdAt);
+                }
+                const diffMs = Date.now() - createdAtDate.getTime();
+                const fourHoursMs = 4 * 60 * 60 * 1000;
+                if (diffMs < fourHoursMs) {
+                  console.log(`[Telegram Chat Snapshot] Skipped for chat ${chatDoc.id} (recent snapshot exists)`);
+                  telegramSnapshotsSkipped++;
+                  continue;
+                }
+              }
+            }
+
+            const cash = chatData.cash !== undefined ? Number(chatData.cash) : 0;
+            currentTgSnapshotBatch.set(snapshotRef, {
+              date: todayStr,
+              stocks: stocks,
+              cash: cash,
+              createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            console.log(`[Telegram Chat Snapshot] Created for chat ${chatDoc.id} (stocks=${stocks.length})`);
+            telegramSnapshotsCreated++;
+
+            tgSnapshotBatchOpCount++;
+            if (tgSnapshotBatchOpCount >= 400) {
+              currentTgSnapshotBatch = adminDb.batch();
+              tgSnapshotBatches.push(currentTgSnapshotBatch);
+              tgSnapshotBatchOpCount = 0;
+            }
+          } catch (chatErr: any) {
+            console.error(`[Telegram Chat Snapshot Error] Failed to generate snapshot for chat ${chatDoc.id}:`, chatErr.message || chatErr);
+          }
+        }
+
+        for (const b of tgSnapshotBatches) {
+          await b.commit();
+        }
+      } catch (tgErr: any) {
+        console.error(`[Telegram Chat Snapshot Error] Failed to process telegram_chats collection:`, tgErr.message || tgErr);
+      }
+
       const elapsed = Date.now() - startTime;
-      console.log(`[Daily Batch] Complete: prices_updated=${pricesUpdated}, prices_failed=${pricesFailed}, snapshots_created=${snapshotsCreated}, elapsed=${elapsed} ms`);
+      console.log(`[Daily Batch] Complete: prices_updated=${pricesUpdated}, prices_failed=${pricesFailed}, snapshots_created=${snapshotsCreated}, telegram_snapshots_created=${telegramSnapshotsCreated}, elapsed=${elapsed} ms`);
 
       return {
         success: true,
         users: usersSnap.size,
         prices: { updated: pricesUpdated, failed: pricesFailed },
         snapshots: { created: snapshotsCreated, skipped: snapshotsSkipped },
+        telegramChatSnapshots: { created: telegramSnapshotsCreated, skipped: telegramSnapshotsSkipped },
         elapsedMs: elapsed
       };
 
