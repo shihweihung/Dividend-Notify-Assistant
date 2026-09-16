@@ -202,8 +202,8 @@ async function startServer() {
     }
   }
 
-  app.use(express.json({ limit: "25mb" }));
-  app.use(express.urlencoded({ limit: "25mb", extended: true }));
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ limit: "1mb", extended: true }));
 
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
@@ -824,7 +824,7 @@ async function startServer() {
           const shares = Number(stock.shares) || 0;
           const info = stock.dividendInfo || stock;
 
-          const eventsToNotify: { type: 'ex-dividend' | 'payment'; amount: number }[] = [];
+          const eventsToNotify: { type: 'ex-dividend' | 'payment'; amount: number; exDateStr?: string }[] = [];
 
           if (info.history && Array.isArray(info.history) && info.history.length > 0) {
             const seenEx = new Set<string>();
@@ -845,7 +845,8 @@ async function startServer() {
                 seenEx.add(exDateStr);
                 eventsToNotify.push({
                   type: 'ex-dividend',
-                  amount: Number(div.amount || info.amount || 0)
+                  amount: Number(div.amount || info.amount || 0),
+                  exDateStr
                 });
               }
 
@@ -853,7 +854,8 @@ async function startServer() {
                 seenPay.add(payDateStr);
                 eventsToNotify.push({
                   type: 'payment',
-                  amount: Number(div.amount || info.amount || 0)
+                  amount: Number(div.amount || info.amount || 0),
+                  exDateStr
                 });
               }
             }
@@ -864,13 +866,15 @@ async function startServer() {
             if (exDateStr === todayStr) {
               eventsToNotify.push({
                 type: 'ex-dividend',
-                amount: Number(info.amount || 0)
+                amount: Number(info.amount || 0),
+                exDateStr
               });
             }
             if (payDateStr === todayStr) {
               eventsToNotify.push({
                 type: 'payment',
-                amount: Number(info.amount || 0)
+                amount: Number(info.amount || 0),
+                exDateStr
               });
             }
           }
@@ -891,11 +895,27 @@ async function startServer() {
               continue;
             }
 
+            let effectiveShares = shares;
+            if (evt.type === 'payment' && evt.exDateStr) {
+              try {
+                const snapsRef = adminDb.collection("telegram_chats").doc(chatDoc.id).collection("snapshots");
+                const snapDocs = await snapsRef.where("date", "<=", evt.exDateStr).orderBy("date", "desc").limit(1).get();
+                if (!snapDocs.empty) {
+                  const targetStock = snapDocs.docs[0].data().stocks?.find((s: any) => s.symbol && normalizeSymbol(s.symbol) === symbol);
+                  if (targetStock && targetStock.shares !== undefined) {
+                    effectiveShares = Number(targetStock.shares);
+                  }
+                }
+              } catch (snapErr) {
+                console.warn(`[Snapshot Lookup Warning] Failed to fetch exDate snapshot for ${symbol} in telegram_chats:`, snapErr);
+              }
+            }
+
             let msgText = "";
             if (evt.type === 'ex-dividend') {
               msgText = `📅 今天是 ${stockName}(${symbol}) 的除息日！每股 $${evt.amount}`;
             } else {
-              const totalEst = Math.round(evt.amount * shares);
+              const totalEst = Math.round(evt.amount * effectiveShares);
               msgText = `💰 今天是 ${stockName}(${symbol}) 的領息日！預計入帳 $${totalEst.toLocaleString()}`;
             }
 
@@ -1427,6 +1447,9 @@ ${top10Json}
             await sendTelegramMsg(botToken, chatId, "😅 截圖解析完成，但未能明確辨識出股票代號與股數，請確認截圖是否清晰或包含完整的股票庫存資訊。");
             return;
           }
+        } else {
+          await sendTelegramMsg(botToken, chatId, "⚠️ 圖片下載失敗，請確認圖片大小或稍後再試。");
+          return;
         }
       } catch (photoErr: any) {
         console.error("[Telegram Photo OCR Error]", photoErr);
@@ -1998,8 +2021,9 @@ ${top10Json}
     let lastErr: any = null;
 
     for (const m of modelsToTry) {
+      let timeoutId: NodeJS.Timeout | undefined = undefined;
       try {
-        const response = await ai.models.generateContent({
+        const apiCallPromise = ai.models.generateContent({
           model: m,
           contents: [
             {
@@ -2014,6 +2038,14 @@ ${top10Json}
             responseMimeType: "application/json"
           }
         });
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new Error(`Gemini API call for model ${m} timed out after 20 seconds`));
+          }, 20000);
+        });
+
+        const response = await Promise.race([apiCallPromise, timeoutPromise]);
         if (response.text) {
           resultText = response.text;
           break;
@@ -2021,6 +2053,10 @@ ${top10Json}
       } catch (e) {
         lastErr = e;
         console.warn(`[Screenshot OCR] Model ${m} failed, trying next...`, e);
+      } finally {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
       }
     }
 
@@ -2063,7 +2099,7 @@ ${top10Json}
   }
 
   // API: AI Parse Portfolio Screenshot
-  app.post("/api/parse-portfolio-screenshot", firebaseAuth, async (req, res) => {
+  app.post("/api/parse-portfolio-screenshot", express.json({ limit: "25mb" }), express.urlencoded({ limit: "25mb", extended: true }), firebaseAuth, async (req, res) => {
     try {
       const { imageBase64, mimeType } = req.body || {};
       if (!imageBase64) {

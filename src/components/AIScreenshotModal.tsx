@@ -145,14 +145,26 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
         throw new Error(data.error || '解析失敗，請重新嘗試');
       }
 
-      const rawItems: ParsedStockItem[] = (data.parsedStocks || []).map((s: any) => ({
-        symbol: (s.symbol || '').toString().trim().toUpperCase().replace(/\.(TW|TWO)$/i, ''),
-        name: (s.name || s.symbol || '').toString().trim(),
-        shares: Math.max(0, Number(s.shares) || 0),
-        cost: s.cost !== null && s.cost !== undefined && !isNaN(Number(s.cost)) ? Number(s.cost) : null,
-        currentPrice: s.currentPrice ? Number(s.currentPrice) : null,
-        selected: true
-      })).filter((item: ParsedStockItem) => item.symbol.length > 0);
+      const validSymbolRegex = /^[A-Za-z0-9]+$/;
+      const skippedInvalidSymbols: string[] = [];
+
+      const rawItems: ParsedStockItem[] = [];
+      for (const s of (data.parsedStocks || [])) {
+        const cleanSym = (s.symbol || '').toString().trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
+        if (!cleanSym) continue;
+        if (!validSymbolRegex.test(cleanSym)) {
+          skippedInvalidSymbols.push(cleanSym);
+          continue;
+        }
+        rawItems.push({
+          symbol: cleanSym,
+          name: (s.name || s.symbol || '').toString().trim(),
+          shares: Math.max(0, Number(s.shares) || 0),
+          cost: s.cost !== null && s.cost !== undefined && !isNaN(Number(s.cost)) ? Number(s.cost) : null,
+          currentPrice: s.currentPrice ? Number(s.currentPrice) : null,
+          selected: true
+        });
+      }
 
       // Deduplicate items
       const map = new Map<string, ParsedStockItem>();
@@ -173,10 +185,14 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
       const items = Array.from(map.values());
 
       if (items.length === 0) {
-        setParseError('未能從圖片中辨識出股票代號或股數，請嘗試上傳更清晰的券商畫面。');
+        setParseError('未能從圖片中辨識出有效的股票代號或股數，請嘗試上傳更清晰的券商畫面。');
       } else {
         setParsedList(items);
-        setSuccessNote(data.note || `成功辨識出 ${items.length} 檔持股！`);
+        let note = data.note || `成功辨識出 ${items.length} 檔持股！`;
+        if (skippedInvalidSymbols.length > 0) {
+          note += ` （包含不合法代號已略過：${skippedInvalidSymbols.join(', ')}）`;
+        }
+        setSuccessNote(note);
       }
     } catch (err: any) {
       console.error('OCR Parsing Error:', err);
@@ -210,9 +226,10 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
   };
 
   const handleConfirmApply = async () => {
-    const selectedItems = parsedList.filter(item => item.selected && item.symbol.trim().length > 0 && item.shares > 0);
+    const validSymbolRegex = /^[A-Za-z0-9]+$/;
+    const selectedItems = parsedList.filter(item => item.selected && validSymbolRegex.test(item.symbol.trim()) && item.shares > 0);
     if (selectedItems.length === 0) {
-      setParseError('請至少勾選並保留一檔有效的股票與股數');
+      setParseError('請至少勾選並保留一檔有效的股票（代號需為英數字）與股數');
       return;
     }
 

@@ -782,6 +782,14 @@ function MainApp() {
         const symbol = normalizeSymbol(item.symbol);
         if (!symbol) continue;
 
+        if (!/^[A-Za-z0-9]+$/.test(symbol)) {
+          failedItems.push({
+            symbol: item.symbol || '未知代號',
+            error: `股票代號格式不合法（"${symbol}" 包含無效字元，僅允許英數字）`
+          });
+          continue;
+        }
+
         let existingStock = workingStocksList.find(s => normalizeSymbol(s.symbol) === symbol);
         let dividendInfo: DividendInfo | null = existingStock?.dividendInfo || null;
 
