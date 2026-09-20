@@ -121,8 +121,51 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
 
     const reader = new FileReader();
     reader.onload = (e) => {
-      const result = e.target?.result as string;
-      setImageBase64(result);
+      const originalDataUrl = e.target?.result as string;
+      if (!originalDataUrl) return;
+
+      const img = new Image();
+      img.onload = () => {
+        try {
+          let { width, height } = img;
+          const maxEdge = 1600;
+
+          if (width > maxEdge || height > maxEdge) {
+            if (width > height) {
+              height = Math.round((height * maxEdge) / width);
+              width = maxEdge;
+            } else {
+              width = Math.round((width * maxEdge) / height);
+              height = maxEdge;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            throw new Error('Canvas context unavailable');
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+          setImageBase64(compressedDataUrl);
+          setMimeType('image/jpeg');
+        } catch (compressErr) {
+          console.warn('[Image Compression Warning] Fallback to original DataURL:', compressErr);
+          setImageBase64(originalDataUrl);
+          setMimeType(file.type || 'image/png');
+        }
+      };
+      img.onerror = () => {
+        setImageBase64(originalDataUrl);
+        setMimeType(file.type || 'image/png');
+      };
+      img.src = originalDataUrl;
+    };
+    reader.onerror = () => {
+      setParseError('讀取圖片檔案失敗，請重新嘗試');
     };
     reader.readAsDataURL(file);
   };

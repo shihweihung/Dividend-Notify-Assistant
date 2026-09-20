@@ -380,6 +380,7 @@ async function startServer() {
     }
   }
 
+  app.use("/api/parse-portfolio-screenshot", express.json({ limit: "25mb" }));
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ limit: "1mb", extended: true }));
 
@@ -525,12 +526,13 @@ async function startServer() {
 
       // Step 2: Query FinMind API for each unique symbol (Parallel calls, 5s timeout each)
       const todayStr = moment().tz("Asia/Taipei").format("YYYY-MM-DD");
+      const priceStartStr = moment().tz("Asia/Taipei").subtract(7, 'days').format("YYYY-MM-DD");
       const priceMap = new Map<string, number>();
       let pricesUpdated = 0;
       let pricesFailed = 0;
 
       await Promise.all(uniqueSymbols.map(async (symbol) => {
-        const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${symbol}&start_date=${todayStr}`;
+        const url = `https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id=${symbol}&start_date=${priceStartStr}`;
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -555,7 +557,7 @@ async function startServer() {
               pricesFailed++;
             }
           } else {
-            console.log(`[Price Refresh] No data returned from FinMind for ${symbol} on date ${todayStr} (could be weekend/before market close)`);
+            console.log(`[Price Refresh] No data from FinMind for ${symbol} (date>=${priceStartStr}, status=${json?.status}, msg=${json?.msg})`);
             pricesFailed++;
           }
         } catch (err: any) {
@@ -815,38 +817,7 @@ async function startServer() {
     }
   }
 
-  let lastUpdateRunDate = "";
-
-  function startDailyUpdateScheduler() {
-    console.log("[Scheduler] Daily stock update scheduler started.");
-    
-    // Asynchronously run batch on server startup to ensure today's snapshot exists
-    setTimeout(() => {
-      runDailyBatchCore().catch(err => console.error("[Startup Daily Batch Error]", err));
-    }, 3000);
-
-    setInterval(async () => {
-      try {
-        const taipeiTime = moment().tz("Asia/Taipei");
-        const todayStr = taipeiTime.format("YYYY-MM-DD");
-        const hourMinute = taipeiTime.format("HH:mm");
-        const dayOfWeek = taipeiTime.day(); // 0 is Sunday, 6 is Saturday
-        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-
-        // Check if it's 2:00 PM (14:00) or later Taipei time and hasn't run today yet
-        if (taipeiTime.hour() >= 14 && lastUpdateRunDate !== todayStr) {
-          lastUpdateRunDate = todayStr;
-          console.log(`[Scheduler] It is ${taipeiTime.format("HH:mm")} Taipei time (${todayStr}). Triggering daily batch snapshot & stock update...`);
-          await runDailyBatchCore();
-        }
-      } catch (err: any) {
-        console.error("[Scheduler Error] Error in daily update check:", err.message || err);
-      }
-    }, 60000); // Check every minute
-  }
-
-  // Start the daily update scheduler
-  startDailyUpdateScheduler();
+  // 排程已改由 Cloud Scheduler 透過 POST /api/cron/daily-batch 觸發
 
   // Core Function: Run Dividend Ex-Date & Payment Date Push Notifications via Telegram
   async function runDividendNotifyCore() {
@@ -905,8 +876,18 @@ async function startServer() {
             stockMap.set(cleanSym, {
               ...existing,
               symbol: cleanSym,
-              shares: Math.max(Number(existing.shares) || 0, Number(s.shares) || 0),
-              cost: existing.cost || s.cost,
+              shares: (Number(existing.shares) || 0) + (Number(s.shares) || 0),
+              cost: (() => {
+                const exShares = Number(existing.shares) || 0;
+                const newShares = Number(s.shares) || 0;
+                const totalShares = exShares + newShares;
+                const exCost = Number(existing.cost) || 0;
+                const newCost = Number(s.cost) || 0;
+                if (totalShares <= 0) return existing.cost ?? s.cost ?? null;
+                if (exCost <= 0 && newCost <= 0) return null;
+                const weighted = ((exShares * exCost) + (newShares * newCost)) / totalShares;
+                return Math.round(weighted * 100) / 100;
+              })(),
               dividendInfo: existing.dividendInfo || s.dividendInfo,
               name: (existing.name && existing.name !== cleanSym) ? existing.name : (s.name || cleanSym)
             });
@@ -1056,8 +1037,18 @@ async function startServer() {
             stockMap.set(cleanSym, {
               ...existing,
               symbol: cleanSym,
-              shares: Math.max(Number(existing.shares) || 0, Number(s.shares) || 0),
-              cost: existing.cost || s.cost,
+              shares: (Number(existing.shares) || 0) + (Number(s.shares) || 0),
+              cost: (() => {
+                const exShares = Number(existing.shares) || 0;
+                const newShares = Number(s.shares) || 0;
+                const totalShares = exShares + newShares;
+                const exCost = Number(existing.cost) || 0;
+                const newCost = Number(s.cost) || 0;
+                if (totalShares <= 0) return existing.cost ?? s.cost ?? null;
+                if (exCost <= 0 && newCost <= 0) return null;
+                const weighted = ((exShares * exCost) + (newShares * newCost)) / totalShares;
+                return Math.round(weighted * 100) / 100;
+              })(),
               dividendInfo: existing.dividendInfo || s.dividendInfo,
               name: (existing.name && existing.name !== cleanSym) ? existing.name : (s.name || cleanSym)
             });
@@ -1200,39 +1191,7 @@ async function startServer() {
     }
   }
 
-  let lastNotifyRunDate = "";
-
-  function startDividendNotifyScheduler() {
-    console.log("[Scheduler] Dividend notification push scheduler started.");
-    
-    // Check on startup after 5 seconds if hour is >= 8
-    setTimeout(() => {
-      const taipeiTime = moment().tz("Asia/Taipei");
-      if (taipeiTime.hour() >= 8 && lastNotifyRunDate !== taipeiTime.format("YYYY-MM-DD")) {
-        lastNotifyRunDate = taipeiTime.format("YYYY-MM-DD");
-        runDividendNotifyCore().catch(err => console.error("[Startup Dividend Notify Error]", err));
-      }
-    }, 5000);
-
-    setInterval(async () => {
-      try {
-        const taipeiTime = moment().tz("Asia/Taipei");
-        const todayStr = taipeiTime.format("YYYY-MM-DD");
-
-        // Trigger if it's 8:00 AM or later Taipei time and hasn't run today yet
-        if (taipeiTime.hour() >= 8 && lastNotifyRunDate !== todayStr) {
-          lastNotifyRunDate = todayStr;
-          console.log(`[Scheduler] It is ${taipeiTime.format("HH:mm")} Taipei time (${todayStr}). Triggering dividend notifications...`);
-          await runDividendNotifyCore();
-        }
-      } catch (err: any) {
-        console.error("[Scheduler Error] Error in dividend notification check:", err.message || err);
-      }
-    }, 60000); // Check every minute
-  }
-
-  // Start the dividend notification scheduler
-  startDividendNotifyScheduler();
+  // 排程已改由 Cloud Scheduler 透過 POST /api/cron/dividend-notify 觸發
 
   // Core Function: Generate Daily "舒洪道" Style Post Draft via Gemini & Telegram Push
   const DAILY_POST_TRIAL_END = "2026-08-11";
@@ -2015,6 +1974,10 @@ ${top10Json}
   // API: Telegram Webhook Receiver (Bidirectional Interaction - Webhook Mode / Callback fallback)
   app.post("/api/telegram/webhook", async (req, res) => {
     try {
+      if (!process.env.API_SECRET_KEY) {
+        console.error("[Webhook] API_SECRET_KEY 未設定，拒絕所有 webhook 請求");
+        return res.sendStatus(500);
+      }
       if (req.headers['x-telegram-bot-api-secret-token'] !== process.env.API_SECRET_KEY) {
         return res.sendStatus(403);
       }
@@ -2356,7 +2319,7 @@ ${top10Json}
   }
 
   // API: AI Parse Portfolio Screenshot
-  app.post("/api/parse-portfolio-screenshot", express.json({ limit: "25mb" }), express.urlencoded({ limit: "25mb", extended: true }), firebaseAuth, async (req, res) => {
+  app.post("/api/parse-portfolio-screenshot", firebaseAuth, async (req, res) => {
     try {
       const { imageBase64, mimeType } = req.body || {};
       if (!imageBase64) {
@@ -2407,7 +2370,7 @@ ${top10Json}
   });
 
   // API: User Manual Trigger for "舒洪道" Daily Post Draft Generation
-  app.post("/api/user/generate-daily-post", async (req, res) => {
+  app.post("/api/user/generate-daily-post", firebaseAuth, async (req, res) => {
     console.log("[API] User requested manual generation of 舒洪道 post draft.");
     const result = await generateDailyPostCore();
     if (result && !result.success) {
@@ -2430,6 +2393,16 @@ ${top10Json}
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) return next(err);
+    if (err && err.type === "entity.too.large") {
+      console.warn(`[Payload Too Large] ${req.method} ${req.path}`);
+      return res.status(413).json({ error: "圖片檔案過大，請改用較小的截圖或重新裁切後再試。" });
+    }
+    console.error(`[Unhandled Error] ${req.method} ${req.path}:`, err);
+    return res.status(500).json({ error: err?.message || "伺服器發生未預期錯誤" });
+  });
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
