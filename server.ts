@@ -2045,6 +2045,63 @@ ${top10Json}
     }
   });
 
+  // Helper: Name-to-Symbol mapping fallback for screenshots without stock code
+  function resolveSymbolFromName(rawSymbol: string, rawName: string): string {
+    let sym = (rawSymbol || '').toString().trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
+    const name = (rawName || '').toString().trim();
+
+    if (/^[A-Za-z0-9]+$/.test(sym)) {
+      return sym;
+    }
+
+    const nameMap: Record<string, string> = {
+      '元大高股息': '0056',
+      '中信美國公債20年': '00795B',
+      '國泰台灣科技龍頭': '00881',
+      '群益台灣精選高息': '00919',
+      '鴻海': '2317',
+      '台積電': '2330',
+      '台新新光金': '2887',
+      '台新金': '2887',
+      '新光金': '2888',
+      '國泰永續高股息': '00878',
+      '復華台灣科技優息': '00929',
+      '元大台灣50': '0050',
+      '富邦台50': '006208',
+      '群益半導體收益': '00927',
+      '元大台灣高息低波': '00713',
+      '元大美債20年': '00679B',
+      '國泰20年美債': '00687B',
+      '中信高評級公司債': '00772B',
+      '凱基優選高股息30': '00915',
+      '大華優利高股息30': '00918',
+      '統一台灣高息動能': '00939',
+      '元大台灣價值高息': '00940',
+      '聯發科': '2454',
+      '廣達': '2382',
+      '緯創': '3231',
+      '長榮': '2603',
+      '陽明': '2609',
+      '萬海': '2615',
+      '中華電': '2412',
+      '富邦金': '2881',
+      '國泰金': '2882',
+      '玉山金': '2884',
+      '兆豐金': '2886',
+      '中信金': '2891',
+      '第一金': '2892'
+    };
+
+    const lookupKey = name || sym;
+    for (const [key, code] of Object.entries(nameMap)) {
+      if (lookupKey.includes(key) || key.includes(lookupKey)) {
+        return code;
+      }
+    }
+
+    return sym;
+  }
+
   // Helper: Gemini Vision OCR for Portfolio Screenshots
   async function parsePortfolioScreenshotWithGemini(imageBase64: string, mimeType: string = "image/png") {
     const apiKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
@@ -2063,15 +2120,27 @@ ${top10Json}
       }
     });
 
-    const prompt = `你是一位精通台灣股市與各大券商 APP（例如：元大證券、國泰樹精靈、富邦 e 點通、永豐金隨身證券、三竹股市、國泰 CUBE、Firstrade 等）庫存畫面辨識的 AI 專家。
+    const prompt = `你是一位精通台灣股市與各大券商 APP（例如：國泰樹精靈、富邦 e 點通、元大證券、三竹股市、永豐金、國泰 CUBE、Firstrade 等）庫存畫面辨識的 AI 專家。
 請仔細辨識這張券商持股/庫存截圖，精準提取出所有股票或 ETF 的持股資料：
 
-請務必精準判斷以下欄位：
-1. "symbol": 股票或 ETF 代號（例如："0056", "2330", "00878", "00919", "00929"；若為美股請填美股代碼）。
-2. "name": 股票或 ETF 名稱（例如："元大高股息", "台積電", "國泰永續高股息"）。
-3. "shares": 持有股數（⚠️ 特別注意：若畫面單位顯示「張」，請務必轉換為「股數」，1 張 = 1000 股！例如 15 張請填 15000；若顯示「股」或無單位數字，請填數字）。
-4. "cost": 平均成本單價（若畫面有顯示均價/買價請填數字；若無顯示填 null）。
-5. "currentPrice": 現價/成交價（若畫面有顯示請填數字；若無顯示填 null）。
+⚠️ 重要規則（特別針對僅顯示「股名」而無「股號」的券商介面）：
+1. 許多券商 APP（如國泰未實現損益、三竹股市畫面）只會顯示「股名」（例如："元大高股息"、"中信美國公債20年"、"國泰台灣科技龍頭"、"群益台灣精選高息"、"鴻海"、"台積電"、"台新新光金"），請你根據自身的台股/美股專業知識，精準推導對應的純英數字股票代號（"symbol"）！
+   例如：
+   - 元大高股息 -> "0056"
+   - 中信美國公債20年 -> "00795B"
+   - 國泰台灣科技龍頭 -> "00881"
+   - 群益台灣精選高息 -> "00919"
+   - 鴻海 -> "2317"
+   - 台積電 -> "2330"
+   - 台新新光金 / 台新金 -> "2887"
+   - 國泰永續高股息 -> "00878"
+   - 復華台灣科技優息 -> "00929"
+   - 元大台灣50 -> "0050"
+2. "symbol": 必須填寫純英數字股票或 ETF 代號（如 "0056", "2330", "00795B", "00881", "00919", "2317", "2887"）。**絕對不可以包含中文**！若畫面上無數字代號，請根據股名自動推導代號填入！
+3. "name": 股票或 ETF 名稱（例如："元大高股息", "台積電", "國泰台灣科技龍頭"）。
+4. "shares": 持有股數（⚠️ 特別注意：若畫面單位顯示「張」，請務必轉換為「股數」，1 張 = 1000 股！例如 15 張請填 15000；若顯示「股」或無單位數字，請填數字，例如 1,050 股填 1050）。
+5. "cost": 平均成本單價（例如：38.15、30.67、188.25，若無顯示填 null）。
+6. "currentPrice": 現價/成交價（若無顯示填 null）。
 
 請只回傳合法的 JSON 格式，不要加入任何 Markdown 標記，格式範例如下：
 {
@@ -2080,8 +2149,8 @@ ${top10Json}
       "symbol": "0056",
       "name": "元大高股息",
       "shares": 15000,
-      "cost": 38.5,
-      "currentPrice": 54.6
+      "cost": 38.15,
+      "currentPrice": null
     }
   ],
   "note": "成功辨識出 1 檔持股"
@@ -2141,13 +2210,18 @@ ${top10Json}
     const rawList = Array.isArray(parsedData.parsedStocks) ? parsedData.parsedStocks : [];
     const stockMap = new Map<string, any>();
     for (const item of rawList) {
-      if (!item || !item.symbol) continue;
-      const cleanSym = String(item.symbol).trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
-      if (!cleanSym) continue;
+      if (!item) continue;
+      const rawSym = String(item.symbol || '').trim();
+      const rawName = String(item.name || '').trim();
+      
+      let cleanSym = resolveSymbolFromName(rawSym, rawName);
+      if (!cleanSym || !/^[A-Za-z0-9]+$/.test(cleanSym)) continue;
+
       if (!stockMap.has(cleanSym)) {
         stockMap.set(cleanSym, {
           ...item,
-          symbol: cleanSym
+          symbol: cleanSym,
+          name: rawName || cleanSym
         });
       } else {
         const existing = stockMap.get(cleanSym);
@@ -2156,7 +2230,7 @@ ${top10Json}
           shares: Math.max(existing.shares || 0, item.shares || 0),
           cost: existing.cost && existing.cost > 0 ? existing.cost : item.cost,
           currentPrice: existing.currentPrice && existing.currentPrice > 0 ? existing.currentPrice : item.currentPrice,
-          name: existing.name || item.name
+          name: existing.name || rawName || cleanSym
         });
       }
     }
