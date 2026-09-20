@@ -23,6 +23,22 @@ export interface ParsedStockItem {
   selected: boolean;
 }
 
+export interface UnresolvedStockItem {
+  name: string;
+  shares: number;
+  cost: number | null;
+  totalCost: number | null;
+}
+
+export interface InvalidStockItem {
+  symbol?: string;
+  name: string;
+  shares: number;
+  cost: number | null;
+  totalCost: number | null;
+  expectedTotal: number;
+}
+
 interface AIScreenshotModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -46,6 +62,8 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
   const [isParsing, setIsParsing] = useState<boolean>(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [parsedList, setParsedList] = useState<ParsedStockItem[]>([]);
+  const [unresolvedList, setUnresolvedList] = useState<UnresolvedStockItem[]>([]);
+  const [invalidList, setInvalidList] = useState<InvalidStockItem[]>([]);
   const [importMode, setImportMode] = useState<'merge' | 'replace' | 'add'>('merge');
   const [isApplying, setIsApplying] = useState<boolean>(false);
   const [successNote, setSuccessNote] = useState<string | null>(null);
@@ -58,6 +76,8 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
       setImageBase64(null);
       setParseError(null);
       setParsedList([]);
+      setUnresolvedList([]);
+      setInvalidList([]);
       setIsParsing(false);
       setSuccessNote(null);
     }
@@ -145,54 +165,36 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
         throw new Error(data.error || '解析失敗，請重新嘗試');
       }
 
-      const validSymbolRegex = /^[A-Za-z0-9]+$/;
-      const skippedInvalidSymbols: string[] = [];
+      const items: ParsedStockItem[] = (data.parsedStocks || []).map((s: any) => ({
+        symbol: (s.symbol || '').toString().trim().toUpperCase(),
+        name: (s.name || s.symbol || '').toString().trim(),
+        shares: Math.max(0, Number(s.shares) || 0),
+        cost: s.cost !== null && s.cost !== undefined && !isNaN(Number(s.cost)) ? Number(s.cost) : null,
+        currentPrice: s.currentPrice ? Number(s.currentPrice) : null,
+        selected: true
+      }));
 
-      const rawItems: ParsedStockItem[] = [];
-      for (const s of (data.parsedStocks || [])) {
-        const cleanSym = (s.symbol || '').toString().trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
-        if (!cleanSym) continue;
-        if (!validSymbolRegex.test(cleanSym)) {
-          skippedInvalidSymbols.push(cleanSym);
-          continue;
-        }
-        rawItems.push({
-          symbol: cleanSym,
-          name: (s.name || s.symbol || '').toString().trim(),
-          shares: Math.max(0, Number(s.shares) || 0),
-          cost: s.cost !== null && s.cost !== undefined && !isNaN(Number(s.cost)) ? Number(s.cost) : null,
-          currentPrice: s.currentPrice ? Number(s.currentPrice) : null,
-          selected: true
-        });
-      }
+      const unresolved: UnresolvedStockItem[] = data.unresolved || [];
+      const invalid: InvalidStockItem[] = data.invalid || [];
 
-      // Deduplicate items
-      const map = new Map<string, ParsedStockItem>();
-      for (const item of rawItems) {
-        if (!map.has(item.symbol)) {
-          map.set(item.symbol, item);
-        } else {
-          const existing = map.get(item.symbol)!;
-          map.set(item.symbol, {
-            ...existing,
-            shares: Math.max(existing.shares, item.shares),
-            cost: existing.cost || item.cost,
-            currentPrice: existing.currentPrice || item.currentPrice
-          });
-        }
-      }
-
-      const items = Array.from(map.values());
-
-      if (items.length === 0) {
-        setParseError('未能從圖片中辨識出有效的股票代號或股數，請嘗試上傳更清晰的券商畫面。');
+      if (items.length === 0 && unresolved.length === 0 && invalid.length === 0) {
+        setParseError('未能從圖片中辨識出有效的股票資料，請嘗試上傳更清晰的券商畫面。');
+        setParsedList([]);
+        setUnresolvedList([]);
+        setInvalidList([]);
       } else {
         setParsedList(items);
-        let note = data.note || `成功辨識出 ${items.length} 檔持股！`;
-        if (skippedInvalidSymbols.length > 0) {
-          note += ` （包含不合法代號已略過：${skippedInvalidSymbols.join(', ')}）`;
+        setUnresolvedList(unresolved);
+        setInvalidList(invalid);
+
+        let noteStr = `成功辨識出 ${items.length} 檔持股！`;
+        const extraParts: string[] = [];
+        if (unresolved.length > 0) extraParts.push(`${unresolved.length} 檔未對照代號`);
+        if (invalid.length > 0) extraParts.push(`${invalid.length} 檔數字檢核不符`);
+        if (extraParts.length > 0) {
+          noteStr += `（另有 ${extraParts.join('、')}）`;
         }
-        setSuccessNote(note);
+        setSuccessNote(noteStr);
       }
     } catch (err: any) {
       console.error('OCR Parsing Error:', err);
@@ -359,14 +361,17 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
                     onClick={() => {
                       setImageBase64(null);
                       setParsedList([]);
+                      setUnresolvedList([]);
+                      setInvalidList([]);
                       setParseError(null);
+                      setSuccessNote(null);
                     }}
                     className="px-2.5 py-1 text-xs font-semibold rounded-lg text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
                   >
                     重新選擇
                   </button>
 
-                  {parsedList.length === 0 && (
+                  {parsedList.length === 0 && unresolvedList.length === 0 && invalidList.length === 0 && (
                     <button
                       onClick={handleStartParsing}
                       disabled={isParsing}
@@ -424,183 +429,234 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
             </div>
           )}
 
-          {/* Step 2: Parsed Stocks Result Table */}
-          {parsedList.length > 0 && (
-            <div className="space-y-3 pt-2">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-extrabold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-                  <span>辨識結果校對（請確認或微調數據）</span>
-                  <span className="px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/60 text-indigo-600 dark:text-indigo-300 text-[10px]">
-                    共 {parsedList.length} 檔
-                  </span>
-                </h4>
+          {/* Step 2: Parsed Stocks Result Table and Notifications */}
+          {(parsedList.length > 0 || unresolvedList.length > 0 || invalidList.length > 0) && (
+            <div className="space-y-4 pt-2">
+              {parsedList.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-extrabold text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                      <span>辨識結果校對（請確認或微調數據）</span>
+                      <span className="px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/60 text-indigo-600 dark:text-indigo-300 text-[10px]">
+                        共 {parsedList.length} 檔
+                      </span>
+                    </h4>
 
-                <button
-                  onClick={handleAddEmptyRow}
-                  className="flex items-center gap-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  新增一列
-                </button>
-              </div>
+                    <button
+                      onClick={handleAddEmptyRow}
+                      className="flex items-center gap-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      新增一列
+                    </button>
+                  </div>
 
-              {/* Table */}
-              <div className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className={`text-[11px] font-bold border-b ${
-                    darkMode ? 'bg-slate-800/80 border-slate-800 text-slate-400' : 'bg-slate-100/80 border-slate-200 text-slate-500'
-                  }`}>
-                    <tr>
-                      <th className="p-2.5 w-8 text-center">
-                        <input
-                          type="checkbox"
-                          checked={allSelected}
-                          onChange={(e) => handleSelectAll(e.target.checked)}
-                          className="rounded text-indigo-600 cursor-pointer"
-                        />
-                      </th>
-                      <th className="p-2.5 w-24">代號</th>
-                      <th className="p-2.5">名稱</th>
-                      <th className="p-2.5 w-28">股數 (1張=1000)</th>
-                      <th className="p-2.5 w-24">成本單價</th>
-                      <th className="p-2.5 w-10 text-center">刪除</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60">
-                    {parsedList.map((item, index) => (
-                      <tr key={index} className={item.selected ? '' : 'opacity-50 bg-slate-50/50 dark:bg-slate-900/30'}>
-                        <td className="p-2.5 text-center">
-                          <input
-                            type="checkbox"
-                            checked={item.selected}
-                            onChange={(e) => handleItemChange(index, 'selected', e.target.checked)}
-                            className="rounded text-indigo-600 cursor-pointer"
-                          />
-                        </td>
-                        <td className="p-2">
-                          <input
-                            type="text"
-                            value={item.symbol}
-                            onChange={(e) => handleItemChange(index, 'symbol', e.target.value.toUpperCase())}
-                            className={`w-full px-2 py-1 rounded-lg border font-mono font-bold text-xs ${
-                              darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800'
-                            }`}
-                            placeholder="如: 0056"
-                          />
-                        </td>
-                        <td className="p-2">
-                          <input
-                            type="text"
-                            value={item.name}
-                            onChange={(e) => handleItemChange(index, 'name', e.target.value)}
-                            className={`w-full px-2 py-1 rounded-lg border text-xs ${
-                              darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800'
-                            }`}
-                            placeholder="如: 元大高股息"
-                          />
-                        </td>
-                        <td className="p-2">
-                          <input
-                            type="number"
-                            value={item.shares || ''}
-                            onChange={(e) => handleItemChange(index, 'shares', Math.max(0, Number(e.target.value)))}
-                            className={`w-full px-2 py-1 rounded-lg border text-xs font-semibold ${
-                              darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800'
-                            }`}
-                            placeholder="股數"
-                          />
-                        </td>
-                        <td className="p-2">
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={item.cost !== null ? item.cost : ''}
-                            onChange={(e) => handleItemChange(index, 'cost', e.target.value ? Number(e.target.value) : null)}
-                            className={`w-full px-2 py-1 rounded-lg border text-xs ${
-                              darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800'
-                            }`}
-                            placeholder="單價成本"
-                          />
-                        </td>
-                        <td className="p-2 text-center">
-                          <button
-                            onClick={() => handleRemoveItem(index)}
-                            className="p-1 text-slate-400 hover:text-red-500 rounded transition-colors cursor-pointer"
-                            title="移除此列"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
+                  {/* Table */}
+                  <div className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className={`text-[11px] font-bold border-b ${
+                        darkMode ? 'bg-slate-800/80 border-slate-800 text-slate-400' : 'bg-slate-100/80 border-slate-200 text-slate-500'
+                      }`}>
+                        <tr>
+                          <th className="p-2.5 w-8 text-center">
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              onChange={(e) => handleSelectAll(e.target.checked)}
+                              className="rounded text-indigo-600 cursor-pointer"
+                            />
+                          </th>
+                          <th className="p-2.5 w-24">代號</th>
+                          <th className="p-2.5">名稱</th>
+                          <th className="p-2.5 w-28">股數 (1張=1000)</th>
+                          <th className="p-2.5 w-24">成本單價</th>
+                          <th className="p-2.5 w-10 text-center">刪除</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60">
+                        {parsedList.map((item, index) => (
+                          <tr key={index} className={item.selected ? '' : 'opacity-50 bg-slate-50/50 dark:bg-slate-900/30'}>
+                            <td className="p-2.5 text-center">
+                              <input
+                                type="checkbox"
+                                checked={item.selected}
+                                onChange={(e) => handleItemChange(index, 'selected', e.target.checked)}
+                                className="rounded text-indigo-600 cursor-pointer"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                type="text"
+                                value={item.symbol}
+                                onChange={(e) => handleItemChange(index, 'symbol', e.target.value.toUpperCase())}
+                                className={`w-full px-2 py-1 rounded-lg border font-mono font-bold text-xs ${
+                                  darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800'
+                                }`}
+                                placeholder="如: 0056"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                type="text"
+                                value={item.name}
+                                onChange={(e) => handleItemChange(index, 'name', e.target.value)}
+                                className={`w-full px-2 py-1 rounded-lg border text-xs ${
+                                  darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800'
+                                }`}
+                                placeholder="如: 元大高股息"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                type="number"
+                                value={item.shares || ''}
+                                onChange={(e) => handleItemChange(index, 'shares', Math.max(0, Number(e.target.value)))}
+                                className={`w-full px-2 py-1 rounded-lg border text-xs font-semibold ${
+                                  darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800'
+                                }`}
+                                placeholder="股數"
+                              />
+                            </td>
+                            <td className="p-2">
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={item.cost !== null ? item.cost : ''}
+                                onChange={(e) => handleItemChange(index, 'cost', e.target.value ? Number(e.target.value) : null)}
+                                className={`w-full px-2 py-1 rounded-lg border text-xs ${
+                                  darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800'
+                                }`}
+                                placeholder="單價成本"
+                              />
+                            </td>
+                            <td className="p-2 text-center">
+                              <button
+                                onClick={() => handleRemoveItem(index)}
+                                className="p-1 text-slate-400 hover:text-red-500 rounded transition-colors cursor-pointer"
+                                title="移除此列"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* 未能對照代號清單 (純文字) */}
+              {unresolvedList.length > 0 && (
+                <div className={`p-3.5 rounded-xl border space-y-2 ${
+                  darkMode ? 'bg-amber-950/20 border-amber-900/40 text-amber-200' : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}>
+                  <div className="flex items-center gap-1.5 font-bold text-xs">
+                    <HelpCircle className="w-4 h-4 text-amber-500 shrink-0" />
+                    <span>未能自動對照代號（共 {unresolvedList.length} 檔）</span>
+                  </div>
+                  <p className="text-[11px] opacity-80">
+                    💡 以下股票未能自動找到對應的股票代號，若已知代號可使用上方「新增一列」手動新增：
+                  </p>
+                  <ul className="text-xs space-y-1 list-disc list-inside font-mono">
+                    {unresolvedList.map((item, idx) => (
+                      <li key={idx}>
+                        <span className="font-sans font-semibold">{item.name}</span>: {Number(item.shares || 0).toLocaleString()} 股（均價: {item.cost !== null && item.cost !== undefined ? `$${item.cost}` : '未顯示'}）
+                      </li>
                     ))}
-                  </tbody>
-                </table>
-              </div>
+                  </ul>
+                </div>
+              )}
+
+              {/* 數字檢核不符清單 (純文字) */}
+              {invalidList.length > 0 && (
+                <div className={`p-3.5 rounded-xl border space-y-2 ${
+                  darkMode ? 'bg-red-950/20 border-red-900/40 text-red-200' : 'bg-red-50 border-red-200 text-red-900'
+                }`}>
+                  <div className="flex items-center gap-1.5 font-bold text-xs">
+                    <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+                    <span>數字檢核不符（共 {invalidList.length} 檔）</span>
+                  </div>
+                  <p className="text-[11px] opacity-80">
+                    💡 畫面顯示的投資成本與「股數 × 均價」不符，建議重新上傳或自行核對調整：
+                  </p>
+                  <ul className="text-xs space-y-1 list-disc list-inside font-mono">
+                    {invalidList.map((item, idx) => (
+                      <li key={idx}>
+                        <span className="font-sans font-semibold">{item.name}</span>
+                        {item.symbol ? ` (${item.symbol})` : ''}: 畫面投資成本 {item.totalCost !== null && item.totalCost !== undefined ? `$${item.totalCost.toLocaleString()}` : '未顯示'}，但 股數 × 均價 = ${item.expectedTotal.toLocaleString()}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {/* Import Mode Radio Options */}
-              <div className={`p-3.5 rounded-xl border space-y-2 ${
-                darkMode ? 'bg-slate-800/50 border-slate-800' : 'bg-slate-50 border-slate-200'
-              }`}>
-                <p className="text-xs font-bold text-slate-600 dark:text-slate-300">
-                  匯入寫入方式：
-                </p>
+              {parsedList.length > 0 && (
+                <div className={`p-3.5 rounded-xl border space-y-2 ${
+                  darkMode ? 'bg-slate-800/50 border-slate-800' : 'bg-slate-50 border-slate-200'
+                }`}>
+                  <p className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                    匯入寫入方式：
+                  </p>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <label className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
-                    importMode === 'merge' 
-                      ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-300 font-bold' 
-                      : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
-                  }`}>
-                    <input
-                      type="radio"
-                      name="importMode"
-                      checked={importMode === 'merge'}
-                      onChange={() => setImportMode('merge')}
-                      className="mt-0.5 text-indigo-600"
-                    />
-                    <div className="text-[11px] leading-tight">
-                      <div>覆蓋與更新 (推薦)</div>
-                      <div className="text-[10px] opacity-75 font-normal mt-0.5">相同代號覆蓋為最新股數，新代號直接加入</div>
-                    </div>
-                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <label className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                      importMode === 'merge' 
+                        ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-300 font-bold' 
+                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                    }`}>
+                      <input
+                        type="radio"
+                        name="importMode"
+                        checked={importMode === 'merge'}
+                        onChange={() => setImportMode('merge')}
+                        className="mt-0.5 text-indigo-600"
+                      />
+                      <div className="text-[11px] leading-tight">
+                        <div>覆蓋與更新 (推薦)</div>
+                        <div className="text-[10px] opacity-75 font-normal mt-0.5">相同代號覆蓋為最新股數，新代號直接加入</div>
+                      </div>
+                    </label>
 
-                  <label className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
-                    importMode === 'add' 
-                      ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-300 font-bold' 
-                      : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
-                  }`}>
-                    <input
-                      type="radio"
-                      name="importMode"
-                      checked={importMode === 'add'}
-                      onChange={() => setImportMode('add')}
-                      className="mt-0.5 text-indigo-600"
-                    />
-                    <div className="text-[11px] leading-tight">
-                      <div>股數累加</div>
-                      <div className="text-[10px] opacity-75 font-normal mt-0.5">把截圖的股數加上目前現有的股數</div>
-                    </div>
-                  </label>
+                    <label className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                      importMode === 'add' 
+                        ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-300 font-bold' 
+                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                    }`}>
+                      <input
+                        type="radio"
+                        name="importMode"
+                        checked={importMode === 'add'}
+                        onChange={() => setImportMode('add')}
+                        className="mt-0.5 text-indigo-600"
+                      />
+                      <div className="text-[11px] leading-tight">
+                        <div>股數累加</div>
+                        <div className="text-[10px] opacity-75 font-normal mt-0.5">把截圖的股數加上目前現有的股數</div>
+                      </div>
+                    </label>
 
-                  <label className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
-                    importMode === 'replace' 
-                      ? 'border-red-500 bg-red-50/50 dark:bg-red-950/40 text-red-600 dark:text-red-300 font-bold' 
-                      : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
-                  }`}>
-                    <input
-                      type="radio"
-                      name="importMode"
-                      checked={importMode === 'replace'}
-                      onChange={() => setImportMode('replace')}
-                      className="mt-0.5 text-indigo-600"
-                    />
-                    <div className="text-[11px] leading-tight">
-                      <div>清空後重置</div>
-                      <div className="text-[10px] opacity-75 font-normal mt-0.5">完全清空原本清單，以此截圖內容為準</div>
-                    </div>
-                  </label>
+                    <label className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                      importMode === 'replace' 
+                        ? 'border-red-500 bg-red-50/50 dark:bg-red-950/40 text-red-600 dark:text-red-300 font-bold' 
+                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                    }`}>
+                      <input
+                        type="radio"
+                        name="importMode"
+                        checked={importMode === 'replace'}
+                        onChange={() => setImportMode('replace')}
+                        className="mt-0.5 text-indigo-600"
+                      />
+                      <div className="text-[11px] leading-tight">
+                        <div>清空後重置</div>
+                        <div className="text-[10px] opacity-75 font-normal mt-0.5">完全清空原本清單，以此截圖內容為準</div>
+                      </div>
+                    </label>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
         </div>
