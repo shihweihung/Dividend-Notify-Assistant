@@ -14,6 +14,184 @@ import { GoogleGenAI } from "@google/genai";
 
 const __dirname = process.cwd();
 
+// Helper: Normalize name for dictionary matching (removes spaces, fullwidth to halfwidth, uppercase)
+export function normalizeName(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/\s+/g, '')
+    .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+    .replace(/　/g, '')
+    .toUpperCase();
+}
+
+const RAW_NAME_MAP: Record<string, string> = {
+  '元大高股息': '0056',
+  '中信美國公債20年': '00795B',
+  '國泰台灣科技龍頭': '00881',
+  '群益台灣精選高息': '00919',
+  '鴻海': '2317',
+  '台積電': '2330',
+  '台新新光金': '2887',
+  '台新金': '2887',
+  '新光金': '2887', // 新光金與台新金於2025/07併入2887
+  '國泰永續高股息': '00878',
+  '復華台灣科技優息': '00929',
+  '元大台灣50': '0050',
+  '富邦台50': '006208',
+  '群益半導體收益': '00927',
+  '元大台灣高息低波': '00713',
+  '元大美債20年': '00679B',
+  '國泰20年美債': '00687B',
+  '中信高評級公司債': '00772B',
+  '凱基優選高股息30': '00915',
+  '大華優利高股息30': '00918',
+  '統一台灣高息動能': '00939',
+  '元大台灣價值高息': '00940',
+  '聯發科': '2454',
+  '廣達': '2382',
+  '緯創': '3231',
+  '長榮': '2603',
+  '陽明': '2609',
+  '萬海': '2615',
+  '中華電': '2412',
+  '富邦金': '2881',
+  '國泰金': '2882',
+  '玉山金': '2884',
+  '兆豐金': '2886',
+  '中信金': '2891',
+  '第一金': '2892'
+};
+
+export const NAME_MAP: Record<string, string> = {};
+for (const [k, v] of Object.entries(RAW_NAME_MAP)) {
+  NAME_MAP[normalizeName(k)] = v;
+}
+
+// Helper: Name-to-Symbol mapping resolution
+export function resolveSymbolFromName(rawSymbol: string, rawName: string): string | null {
+  const sym = (rawSymbol || '').toString().trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
+  const name = normalizeName(rawName);
+
+  // 1. 名稱完全比對優先（名稱是畫面上抄下來的，比 LLM 推導的代號可信）
+  if (name && NAME_MAP[name]) {
+    return NAME_MAP[name];
+  }
+
+  // 2. 名稱查不到，才退回 Gemini 的代號，且必須符合台股代號格式（例如 4-6 碼數字 + 可選尾綴 A-Z）
+  if (/^\d{4,6}[A-Z]?$/.test(sym)) {
+    return sym;
+  }
+
+  // 3. 美股代號（純英文字母 1-5 碼）
+  if (/^[A-Z]{1,5}$/.test(sym)) {
+    return sym;
+  }
+
+  // 4. 都不成立回 null，交由上層處理，不可靜默丟棄
+  return null;
+}
+
+// Helper: Process parsed stock items, calculate checksum, and merge weighted averages
+export function mergeAndValidateStocks(rawList: any[]) {
+  const resolvedMap = new Map<string, {
+    symbol: string;
+    name: string;
+    shares: number;
+    cost: number | null;
+    currentPrice: number | null;
+    totalCost: number | null;
+  }>();
+
+  const unresolved: Array<{
+    name: string;
+    shares: number;
+    cost: number | null;
+    totalCost: number | null;
+  }> = [];
+
+  const invalid: Array<{
+    symbol?: string;
+    name: string;
+    shares: number;
+    cost: number | null;
+    totalCost: number | null;
+    expectedTotal: number;
+  }> = [];
+
+  for (const item of rawList) {
+    if (!item) continue;
+    const rawSym = String(item.symbol || '').trim();
+    const rawName = String(item.name || '').trim();
+    const shares = Number(item.shares) || 0;
+    const cost = item.cost !== null && item.cost !== undefined && !isNaN(Number(item.cost)) ? Number(item.cost) : null;
+    const currentPrice = item.currentPrice !== null && item.currentPrice !== undefined && !isNaN(Number(item.currentPrice)) ? Number(item.currentPrice) : null;
+    const totalCost = item.totalCost !== null && item.totalCost !== undefined && !isNaN(Number(item.totalCost)) ? Number(item.totalCost) : null;
+
+    const cleanSym = resolveSymbolFromName(rawSym, rawName);
+
+    if (!cleanSym) {
+      unresolved.push({
+        name: rawName || '未知股名',
+        shares,
+        cost,
+        totalCost
+      });
+      continue;
+    }
+
+    // Checksum 檢查：只在 shares > 0, cost > 0, totalCost > 0 時進行
+    if (shares > 0 && cost !== null && cost > 0 && totalCost !== null && totalCost > 0) {
+      const expectedTotal = shares * cost;
+      const diffRatio = Math.abs(expectedTotal - totalCost) / totalCost;
+      if (diffRatio > 0.001) {
+        invalid.push({
+          symbol: cleanSym,
+          name: rawName || cleanSym,
+          shares,
+          cost,
+          totalCost,
+          expectedTotal: Math.round(expectedTotal)
+        });
+        continue;
+      }
+    }
+
+    // 修正 6：同代號合併 (股數相加，成本以加權平均重算)
+    if (!resolvedMap.has(cleanSym)) {
+      resolvedMap.set(cleanSym, {
+        symbol: cleanSym,
+        name: rawName || cleanSym,
+        shares,
+        cost,
+        currentPrice,
+        totalCost
+      });
+    } else {
+      const existing = resolvedMap.get(cleanSym)!;
+      const totalShares = (existing.shares || 0) + shares;
+      const existingCost = existing.cost || 0;
+      const itemCost = cost || 0;
+      const totalCostSum = ((existing.shares || 0) * existingCost) + (shares * itemCost);
+      const newCost = totalShares > 0 ? (totalCostSum / totalShares) : null;
+
+      resolvedMap.set(cleanSym, {
+        symbol: cleanSym,
+        name: existing.name || rawName || cleanSym,
+        shares: totalShares,
+        cost: newCost !== null ? Math.round(newCost * 100) / 100 : null,
+        currentPrice: existing.currentPrice || currentPrice,
+        totalCost: (existing.totalCost || 0) + (totalCost || 0)
+      });
+    }
+  }
+
+  return {
+    parsedStocks: Array.from(resolvedMap.values()),
+    unresolved,
+    invalid
+  };
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -1502,20 +1680,46 @@ ${top10Json}
 
           const parsed = await parsePortfolioScreenshotWithGemini(base64Img, mimeType);
           
-          if (parsed.parsedStocks && parsed.parsedStocks.length > 0) {
-            let summaryText = `🎉 *「息引力」AI 截圖解析完成！*\n\n共成功辨識出 ${parsed.parsedStocks.length} 檔持股：\n`;
-            
-            for (const item of parsed.parsedStocks) {
-              const sharesStr = Number(item.shares || 0).toLocaleString();
-              const costStr = item.cost ? `$${item.cost}` : '未顯示';
-              summaryText += `• *${item.symbol} ${item.name || ''}*: ${sharesStr} 股 (成本: ${costStr})\n`;
+          const hasResolved = parsed.parsedStocks && parsed.parsedStocks.length > 0;
+          const hasUnresolved = parsed.unresolved && parsed.unresolved.length > 0;
+          const hasInvalid = parsed.invalid && parsed.invalid.length > 0;
+
+          if (hasResolved || hasUnresolved || hasInvalid) {
+            let summaryText = `🎉 *「息引力」AI 截圖解析完成！*\n\n`;
+
+            if (hasResolved) {
+              summaryText += `✅ *成功解析 ${parsed.parsedStocks.length} 檔持股*：\n`;
+              for (const item of parsed.parsedStocks) {
+                const sharesStr = Number(item.shares || 0).toLocaleString();
+                const costStr = item.cost !== null && item.cost !== undefined ? `$${item.cost}` : '未顯示';
+                summaryText += `• *${item.symbol} ${item.name || ''}*: ${sharesStr} 股 (均價: ${costStr})\n`;
+              }
+            }
+
+            if (hasUnresolved) {
+              summaryText += `\n❓ *以下 ${parsed.unresolved.length} 檔未能自動對照股票代號*：\n`;
+              for (const item of parsed.unresolved) {
+                const sharesStr = Number(item.shares || 0).toLocaleString();
+                const costStr = item.cost !== null && item.cost !== undefined ? `$${item.cost}` : '未顯示';
+                summaryText += `• *${item.name}*: ${sharesStr} 股 (均價: ${costStr})\n`;
+              }
+              summaryText += `👉 請回覆此訊息提供正確的股票代號（例如：「${parsed.unresolved[0].name} 代號是 0056」）\n`;
+            }
+
+            if (hasInvalid) {
+              summaryText += `\n⚠️ *以下 ${parsed.invalid.length} 檔數字檢核不符*：\n`;
+              for (const item of parsed.invalid) {
+                const totalCostStr = item.totalCost !== null && item.totalCost !== undefined ? `$${item.totalCost.toLocaleString()}` : '未顯示';
+                const expStr = `$${item.expectedTotal.toLocaleString()}`;
+                summaryText += `• *${item.name} (${item.symbol || '無代號'})*: 畫面投資成本 ${totalCostStr}，但以 股數(${item.shares}) × 均價(${item.cost}) 計算應為 ${expStr}\n`;
+              }
             }
 
             summaryText += `\n💡 提示：請至「息引力」網頁介面使用「📷 AI 截圖匯入」，或直接將持股寫入資料庫！🚀`;
             await sendTelegramMsg(botToken, chatId, summaryText);
             return;
           } else {
-            await sendTelegramMsg(botToken, chatId, "😅 截圖解析完成，但未能明確辨識出股票代號與股數，請確認截圖是否清晰或包含完整的股票庫存資訊。");
+            await sendTelegramMsg(botToken, chatId, "😅 截圖解析完成，但未能明確辨識出股票資料，請確認截圖是否清晰或包含完整的股票庫存資訊。");
             return;
           }
         } else {
@@ -2045,63 +2249,6 @@ ${top10Json}
     }
   });
 
-  // Helper: Name-to-Symbol mapping fallback for screenshots without stock code
-  function resolveSymbolFromName(rawSymbol: string, rawName: string): string {
-    let sym = (rawSymbol || '').toString().trim().toUpperCase().replace(/\.(TW|TWO)$/i, '');
-    const name = (rawName || '').toString().trim();
-
-    if (/^[A-Za-z0-9]+$/.test(sym)) {
-      return sym;
-    }
-
-    const nameMap: Record<string, string> = {
-      '元大高股息': '0056',
-      '中信美國公債20年': '00795B',
-      '國泰台灣科技龍頭': '00881',
-      '群益台灣精選高息': '00919',
-      '鴻海': '2317',
-      '台積電': '2330',
-      '台新新光金': '2887',
-      '台新金': '2887',
-      '新光金': '2888',
-      '國泰永續高股息': '00878',
-      '復華台灣科技優息': '00929',
-      '元大台灣50': '0050',
-      '富邦台50': '006208',
-      '群益半導體收益': '00927',
-      '元大台灣高息低波': '00713',
-      '元大美債20年': '00679B',
-      '國泰20年美債': '00687B',
-      '中信高評級公司債': '00772B',
-      '凱基優選高股息30': '00915',
-      '大華優利高股息30': '00918',
-      '統一台灣高息動能': '00939',
-      '元大台灣價值高息': '00940',
-      '聯發科': '2454',
-      '廣達': '2382',
-      '緯創': '3231',
-      '長榮': '2603',
-      '陽明': '2609',
-      '萬海': '2615',
-      '中華電': '2412',
-      '富邦金': '2881',
-      '國泰金': '2882',
-      '玉山金': '2884',
-      '兆豐金': '2886',
-      '中信金': '2891',
-      '第一金': '2892'
-    };
-
-    const lookupKey = name || sym;
-    for (const [key, code] of Object.entries(nameMap)) {
-      if (lookupKey.includes(key) || key.includes(lookupKey)) {
-        return code;
-      }
-    }
-
-    return sym;
-  }
-
   // Helper: Gemini Vision OCR for Portfolio Screenshots
   async function parsePortfolioScreenshotWithGemini(imageBase64: string, mimeType: string = "image/png") {
     const apiKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
@@ -2123,34 +2270,24 @@ ${top10Json}
     const prompt = `你是一位精通台灣股市與各大券商 APP（例如：國泰樹精靈、富邦 e 點通、元大證券、三竹股市、永豐金、國泰 CUBE、Firstrade 等）庫存畫面辨識的 AI 專家。
 請仔細辨識這張券商持股/庫存截圖，精準提取出所有股票或 ETF 的持股資料：
 
-⚠️ 重要規則（特別針對僅顯示「股名」而無「股號」的券商介面）：
-1. 許多券商 APP（如國泰未實現損益、三竹股市畫面）只會顯示「股名」（例如："元大高股息"、"中信美國公債20年"、"國泰台灣科技龍頭"、"群益台灣精選高息"、"鴻海"、"台積電"、"台新新光金"），請你根據自身的台股/美股專業知識，精準推導對應的純英數字股票代號（"symbol"）！
-   例如：
-   - 元大高股息 -> "0056"
-   - 中信美國公債20年 -> "00795B"
-   - 國泰台灣科技龍頭 -> "00881"
-   - 群益台灣精選高息 -> "00919"
-   - 鴻海 -> "2317"
-   - 台積電 -> "2330"
-   - 台新新光金 / 台新金 -> "2887"
-   - 國泰永續高股息 -> "00878"
-   - 復華台灣科技優息 -> "00929"
-   - 元大台灣50 -> "0050"
-2. "symbol": 必須填寫純英數字股票或 ETF 代號（如 "0056", "2330", "00795B", "00881", "00919", "2317", "2887"）。**絕對不可以包含中文**！若畫面上無數字代號，請根據股名自動推導代號填入！
-3. "name": 股票或 ETF 名稱（例如："元大高股息", "台積電", "國泰台灣科技龍頭"）。
-4. "shares": 持有股數（⚠️ 特別注意：若畫面單位顯示「張」，請務必轉換為「股數」，1 張 = 1000 股！例如 15 張請填 15000；若顯示「股」或無單位數字，請填數字，例如 1,050 股填 1050）。
-5. "cost": 平均成本單價（例如：38.15、30.67、188.25，若無顯示填 null）。
-6. "currentPrice": 現價/成交價（若無顯示填 null）。
+⚠️ 欄位填寫指示：
+1. "symbol": 只填畫面上實際看得到的代號（例如 "2330", "0056"）。畫面上若沒有數字/英文代號就填 null，絕對不要推測或依記憶補上。
+2. "name": 完全照抄畫面上的股名，不翻譯、不補字、不展開簡稱。
+3. "shares": 持有股數（⚠️ 若畫面單位顯示「張」，請務必轉換為「股數」，1 張 = 1000 股！例如 15 張填 15000；若顯示「股」或無單位數字，請填數字，例如 1,050 股填 1050）。
+4. "cost": 平均成本單價（若畫面顯示均價/買價請填數字；若無顯示填 null）。
+5. "currentPrice": 現價/成交價（若畫面顯示請填數字；若無顯示填 null）。
+6. "totalCost": 畫面上的「投資成本」或「總投資成本」欄位數字（例如 572239），若畫面無此欄位填 null。
 
 請只回傳合法的 JSON 格式，不要加入任何 Markdown 標記，格式範例如下：
 {
   "parsedStocks": [
     {
-      "symbol": "0056",
+      "symbol": null,
       "name": "元大高股息",
       "shares": 15000,
       "cost": 38.15,
-      "currentPrice": null
+      "currentPrice": null,
+      "totalCost": 572239
     }
   ],
   "note": "成功辨識出 1 檔持股"
@@ -2208,38 +2345,13 @@ ${top10Json}
     const parsedData = JSON.parse(cleanJsonStr);
 
     const rawList = Array.isArray(parsedData.parsedStocks) ? parsedData.parsedStocks : [];
-    const stockMap = new Map<string, any>();
-    for (const item of rawList) {
-      if (!item) continue;
-      const rawSym = String(item.symbol || '').trim();
-      const rawName = String(item.name || '').trim();
-      
-      let cleanSym = resolveSymbolFromName(rawSym, rawName);
-      if (!cleanSym || !/^[A-Za-z0-9]+$/.test(cleanSym)) continue;
-
-      if (!stockMap.has(cleanSym)) {
-        stockMap.set(cleanSym, {
-          ...item,
-          symbol: cleanSym,
-          name: rawName || cleanSym
-        });
-      } else {
-        const existing = stockMap.get(cleanSym);
-        stockMap.set(cleanSym, {
-          ...existing,
-          shares: Math.max(existing.shares || 0, item.shares || 0),
-          cost: existing.cost && existing.cost > 0 ? existing.cost : item.cost,
-          currentPrice: existing.currentPrice && existing.currentPrice > 0 ? existing.currentPrice : item.currentPrice,
-          name: existing.name || rawName || cleanSym
-        });
-      }
-    }
-
-    const uniqueList = Array.from(stockMap.values());
+    const mergedResult = mergeAndValidateStocks(rawList);
 
     return {
-      parsedStocks: uniqueList,
-      note: parsedData.note || `成功辨識出 ${uniqueList.length} 檔持股`
+      parsedStocks: mergedResult.parsedStocks,
+      unresolved: mergedResult.unresolved,
+      invalid: mergedResult.invalid,
+      note: parsedData.note || `成功辨識出 ${mergedResult.parsedStocks.length} 檔持股`
     };
   }
 
@@ -2255,6 +2367,8 @@ ${top10Json}
       return res.json({
         success: true,
         parsedStocks: result.parsedStocks,
+        unresolved: result.unresolved,
+        invalid: result.invalid,
         note: result.note
       });
     } catch (err: any) {
@@ -2322,6 +2436,8 @@ ${top10Json}
   });
 }
 
-startServer().catch((err) => {
-  console.error("Fatal error starting server:", err);
-});
+if (process.env.NODE_ENV !== "test") {
+  startServer().catch((err) => {
+    console.error("Fatal error starting server:", err);
+  });
+}
