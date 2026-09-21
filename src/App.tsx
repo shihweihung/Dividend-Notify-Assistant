@@ -181,7 +181,7 @@ function MainApp() {
 
   const [snapshots, setSnapshots] = useState<{ date: string; stocks: any[] }[]>([]);
   const [stockToDelete, setStockToDelete] = useState<{ symbol: string; name: string } | null>(null);
-  const [stockFilterTab, setStockFilterTab] = useState<'all' | 'active' | 'sold'>('all');
+  const [stockFilterTab, setStockFilterTab] = useState<'active' | 'sold'>('active');
   const [stockGrouping, setStockGrouping] = useState<'none' | 'type' | 'frequency'>('none');
   const [collapsedStockCards, setCollapsedStockCards] = useState<Set<string>>(new Set());
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -213,9 +213,8 @@ function MainApp() {
   const filteredStocks = useMemo(() => {
     const { uniqueStocks } = deduplicateStocks(stocks);
     return uniqueStocks.filter(stock => {
-      if (stockFilterTab === 'active') return stock.shares > 0;
       if (stockFilterTab === 'sold') return stock.shares === 0;
-      return true;
+      return stock.shares > 0;
     });
   }, [stocks, stockFilterTab]);
 
@@ -3081,17 +3080,6 @@ function MainApp() {
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                       {/* Line 1 (Mobile): Filter Tabs */}
                       <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/60 w-fit shrink-0">
-                        <button
-                          onClick={() => setStockFilterTab('all')}
-                          className={cn(
-                            "px-2.5 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer",
-                            stockFilterTab === 'all' 
-                              ? (darkMode ? "bg-slate-900 text-indigo-400 shadow-xs" : "bg-white text-indigo-600 shadow-xs") 
-                              : "text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-                          )}
-                        >
-                          全部 ({stocks.length})
-                        </button>
                         <button
                           onClick={() => setStockFilterTab('active')}
                           className={cn(
