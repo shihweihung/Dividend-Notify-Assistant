@@ -63,7 +63,8 @@ export const PortfolioTrendChart: React.FC<PortfolioTrendChartProps> = ({
           // If stocks exist but prices were 0, use totalValue - cash if available
           snapStock = Number(snap.totalValue) - (Number(snap.cash) || 0);
         } else {
-          snapStock = computedStock;
+          // 有股票持股但算不出市值（無有效股價且無 totalValue 可回退），標記為 null 予以跳過，避免誤判為 0 造成假崩跌
+          snapStock = null;
         }
       } else if (hasTotalValue) {
         // Fallback: if stocks array is missing, deduce from totalValue - cash
