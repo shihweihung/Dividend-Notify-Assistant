@@ -33,6 +33,7 @@ import {
   Camera
 } from 'lucide-react';
 import { AIScreenshotModal } from './components/AIScreenshotModal';
+import { PortfolioTrendChart } from './components/PortfolioTrendChart';
 import { 
   PieChart as RechartsPieChart, 
   Pie, 
@@ -179,7 +180,7 @@ function MainApp() {
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
   const [isScreenshotModalOpen, setIsScreenshotModalOpen] = useState(false);
 
-  const [snapshots, setSnapshots] = useState<{ date: string; stocks: any[] }[]>([]);
+  const [snapshots, setSnapshots] = useState<{ date: string; stocks?: any[]; cash?: number; totalValue?: number }[]>([]);
   const [stockToDelete, setStockToDelete] = useState<{ symbol: string; name: string } | null>(null);
   const [stockFilterTab, setStockFilterTab] = useState<'active' | 'sold'>('active');
   const [stockGrouping, setStockGrouping] = useState<'none' | 'type' | 'frequency'>('none');
@@ -277,7 +278,15 @@ function MainApp() {
     }
     const snapshotsRef = collection(db, 'users', user.uid, 'snapshots');
     const unsubscribe = onSnapshot(snapshotsRef, (snapshot) => {
-      const list = snapshot.docs.map(doc => doc.data() as { date: string; stocks: any[] });
+      const list = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          date: data.date || doc.id,
+          stocks: data.stocks || [],
+          cash: data.cash !== undefined ? Number(data.cash) : 0,
+          totalValue: data.totalValue !== undefined ? Number(data.totalValue) : 0,
+        };
+      });
       list.sort((a, b) => a.date.localeCompare(b.date));
       setSnapshots(list);
     }, (err) => {
@@ -2825,6 +2834,13 @@ function MainApp() {
                   <p className="text-[10px] text-slate-400 italic py-2">尚無持股數據</p>
                 )}
               </div>
+
+              {/* Stock Market Value Trend Chart (首頁最下方，可收合) */}
+              <PortfolioTrendChart
+                snapshots={snapshots}
+                currentStockValue={portfolioData.totalValue}
+                darkMode={darkMode}
+              />
             </motion.div>
           ) : activeTab === 'history' ? (
             <motion.div
