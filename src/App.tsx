@@ -282,9 +282,9 @@ function MainApp() {
         const data = doc.data();
         return {
           date: data.date || doc.id,
-          stocks: data.stocks || [],
-          cash: data.cash !== undefined ? Number(data.cash) : 0,
-          totalValue: data.totalValue !== undefined ? Number(data.totalValue) : 0,
+          stocks: Array.isArray(data.stocks) ? data.stocks : undefined,
+          cash: data.cash !== undefined && data.cash !== null ? Number(data.cash) : undefined,
+          totalValue: data.totalValue !== undefined && data.totalValue !== null ? Number(data.totalValue) : undefined,
         };
       });
       list.sort((a, b) => a.date.localeCompare(b.date));

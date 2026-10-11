@@ -44,19 +44,41 @@ export const PortfolioTrendChart: React.FC<PortfolioTrendChartProps> = ({
     // 1. Fill historical snapshots
     snapshots.forEach((snap) => {
       if (!snap || !snap.date) return;
-      let snapStock = 0;
+      let snapStock: number | null = null;
 
-      if (snap.stocks && Array.isArray(snap.stocks) && snap.stocks.length > 0) {
-        snapStock = snap.stocks.reduce((acc, s) => {
+      const hasStocksArray = Array.isArray(snap.stocks);
+      const hasStockItems = hasStocksArray && snap.stocks!.length > 0;
+      const hasTotalValue = snap.totalValue !== undefined && snap.totalValue !== null && !isNaN(Number(snap.totalValue));
+
+      if (hasStockItems) {
+        const computedStock = snap.stocks!.reduce((acc, s) => {
           const shares = Number(s.shares) || 0;
           const p = Number(s.currentPrice ?? s.dividendInfo?.currentPrice) || 0;
           return acc + shares * p;
         }, 0);
-      } else if (snap.totalValue !== undefined && snap.totalValue !== null) {
+
+        if (computedStock > 0) {
+          snapStock = computedStock;
+        } else if (hasTotalValue && Number(snap.totalValue) > (Number(snap.cash) || 0)) {
+          // If stocks exist but prices were 0, use totalValue - cash if available
+          snapStock = Number(snap.totalValue) - (Number(snap.cash) || 0);
+        } else {
+          snapStock = computedStock;
+        }
+      } else if (hasTotalValue) {
         // Fallback: if stocks array is missing, deduce from totalValue - cash
         const snapCash = Number(snap.cash) || 0;
-        const snapTotal = Number(snap.totalValue) || 0;
-        snapStock = Math.max(0, snapTotal - snapCash);
+        const snapTotal = Number(snap.totalValue);
+        // If totalValue was recorded as positive, or if stocks was explicitly an empty array []
+        if (snapTotal > 0 || (snapTotal === 0 && hasStocksArray)) {
+          snapStock = Math.max(0, snapTotal - snapCash);
+        }
+      }
+
+      // If both stocks and totalValue are missing/invalid, skip this date point
+      // to avoid plotting a fake crash to 0
+      if (snapStock === null || isNaN(snapStock)) {
+        return;
       }
 
       map.set(snap.date, {
