@@ -499,8 +499,16 @@ function MainApp() {
           const raw = JSON.parse(saved);
           const { uniqueStocks } = deduplicateStocks(raw);
           setStocks(uniqueStocks);
-        } catch {
-          setStocks([]);
+        } catch (e) {
+          console.error('[Storage Error] Failed to parse local taiwan_stocks:', e);
+          safeStorage.setItem('taiwan_stocks_corrupted_backup', saved);
+          const errorMsg = '偵測到本機持股資料損毀，暫時無法載入，原始資料已備份保留，請聯繫客服或嘗試其他裝置登入查看雲端資料';
+          try {
+            alert(errorMsg);
+          } catch {
+            // ignore alert failure if in restricted environment
+          }
+          setError(errorMsg);
         }
       } else {
         setStocks([]);
@@ -629,8 +637,8 @@ function MainApp() {
             });
             safeStorage.removeItem('taiwan_stocks');
           }
-        } catch {
-          // ignore corrupted local storage
+        } catch (e) {
+          console.warn(`使用者 ${user.uid} 的本機持股資料損毀，搬移到 Firestore 的流程已跳過`, e);
         }
       }
     }

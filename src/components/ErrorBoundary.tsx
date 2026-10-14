@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { AlertTriangle, RefreshCw, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
+import { safeStorage } from '../utils/storage';
 
 export interface ErrorBoundaryProps {
   children: React.ReactNode;
@@ -63,7 +64,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
 
   handleHardReset = () => {
     try {
-      localStorage.clear();
+      safeStorage.clear();
       sessionStorage.clear();
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.getRegistrations().then((registrations) => {
@@ -72,6 +73,11 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
       }
     } catch (e) {
       console.warn('Error clearing storage:', e);
+      try {
+        alert('清除快取失敗，請改用瀏覽器設定手動清除資料後再試');
+      } catch {
+        // ignore alert error in restricted environments
+      }
     }
     window.location.reload();
   };
