@@ -22,15 +22,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
-      - run: npm ci
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
 
       - name: Lint
-        run: npm run lint 2>&1 | tee lint.log || true
+        run: bun run lint 2>&1 | tee lint.log || true
 
       - name: Test
-        run: npm test 2>&1 | tee test.log || true
+        run: bun run test 2>&1 | tee test.log || true
 
       - name: Claude review
         env:
