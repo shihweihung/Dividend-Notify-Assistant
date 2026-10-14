@@ -72,6 +72,7 @@ import { twMerge } from 'tailwind-merge';
 // 移除直接引用伺服器端服務，改用 API 呼叫以避免瀏覽器端編譯錯誤
 // import { fetchDividendData } from './services/geminiService';
 import { type StockEntry, type CalendarEvent, type DividendInfo, normalizeSymbol, deduplicateStocks } from './types';
+import { safeStorage } from './utils/storage';
 import { 
   auth, 
   db, 
@@ -158,11 +159,11 @@ function MainApp() {
     typeof Notification !== 'undefined' ? Notification.permission : 'default'
   );
   const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
-    const saved = localStorage.getItem('dividend_notifications_enabled');
+    const saved = safeStorage.getItem('dividend_notifications_enabled');
     return saved !== 'false'; // Defaults to true
   });
   const [darkMode, setDarkMode] = useState(() => {
-    const saved = localStorage.getItem('dividend_dark_mode');
+    const saved = safeStorage.getItem('dividend_dark_mode');
     return saved === 'true';
   });
   const [isOverviewExpanded, setIsOverviewExpanded] = useState(false);
@@ -172,10 +173,10 @@ function MainApp() {
   const [isEditingCash, setIsEditingCash] = useState(false);
   const [cashInput, setCashInput] = useState('');
   const [telegramBotToken, setTelegramBotToken] = useState(() => {
-    return localStorage.getItem('telegram_bot_token') || '';
+    return safeStorage.getItem('telegram_bot_token') || '';
   });
   const [telegramChatId, setTelegramChatId] = useState(() => {
-    return localStorage.getItem('telegram_chat_id') || '';
+    return safeStorage.getItem('telegram_chat_id') || '';
   });
   const [isSendingTelegram, setIsSendingTelegram] = useState(false);
   const [isScreenshotModalOpen, setIsScreenshotModalOpen] = useState(false);
@@ -419,7 +420,7 @@ function MainApp() {
 
   // Dark Mode
   useEffect(() => {
-    localStorage.setItem('dividend_dark_mode', darkMode.toString());
+    safeStorage.setItem('dividend_dark_mode', darkMode.toString());
     if (darkMode) {
       document.documentElement.classList.add('dark');
     } else {
@@ -429,7 +430,7 @@ function MainApp() {
 
   // Notifications Enabled State persistence
   useEffect(() => {
-    localStorage.setItem('dividend_notifications_enabled', notificationsEnabled.toString());
+    safeStorage.setItem('dividend_notifications_enabled', notificationsEnabled.toString());
   }, [notificationsEnabled]);
 
   // Firestore Sync
@@ -492,11 +493,15 @@ function MainApp() {
 
       return () => unsubscribe();
     } else {
-      const saved = localStorage.getItem('taiwan_stocks');
+      const saved = safeStorage.getItem('taiwan_stocks');
       if (saved) {
-        const raw = JSON.parse(saved);
-        const { uniqueStocks } = deduplicateStocks(raw);
-        setStocks(uniqueStocks);
+        try {
+          const raw = JSON.parse(saved);
+          const { uniqueStocks } = deduplicateStocks(raw);
+          setStocks(uniqueStocks);
+        } catch {
+          setStocks([]);
+        }
       } else {
         setStocks([]);
       }
@@ -535,14 +540,14 @@ function MainApp() {
 
       return () => unsubscribe();
     } else {
-      const savedCash = localStorage.getItem('taiwan_cash');
+      const savedCash = safeStorage.getItem('taiwan_cash');
       if (savedCash) {
         setCash(Number(savedCash));
       } else {
         setCash(0);
       }
-      const savedBotToken = localStorage.getItem('telegram_bot_token');
-      const savedChatId = localStorage.getItem('telegram_chat_id');
+      const savedBotToken = safeStorage.getItem('telegram_bot_token');
+      const savedChatId = safeStorage.getItem('telegram_chat_id');
       setTelegramBotToken(savedBotToken || '');
       setTelegramChatId(savedChatId || '');
     }
@@ -606,22 +611,26 @@ function MainApp() {
   // Migration
   useEffect(() => {
     if (user && isAuthReady) {
-      const saved = localStorage.getItem('taiwan_stocks');
+      const saved = safeStorage.getItem('taiwan_stocks');
       if (saved) {
-        const localStocks = JSON.parse(saved) as StockEntry[];
-        if (localStocks.length > 0 && stocks.length === 0) {
-          localStocks.forEach(async (stock) => {
-            const stockRef = doc(db, 'users', user.uid, 'stocks', stock.symbol);
-            try {
-              await setDoc(stockRef, {
-                ...stock,
-                updatedAt: serverTimestamp()
-              });
-            } catch (err) {
-              console.error("Migration error", err);
-            }
-          });
-          localStorage.removeItem('taiwan_stocks');
+        try {
+          const localStocks = JSON.parse(saved) as StockEntry[];
+          if (localStocks.length > 0 && stocks.length === 0) {
+            localStocks.forEach(async (stock) => {
+              const stockRef = doc(db, 'users', user.uid, 'stocks', stock.symbol);
+              try {
+                await setDoc(stockRef, {
+                  ...stock,
+                  updatedAt: serverTimestamp()
+                });
+              } catch (err) {
+                console.error("Migration error", err);
+              }
+            });
+            safeStorage.removeItem('taiwan_stocks');
+          }
+        } catch {
+          // ignore corrupted local storage
         }
       }
     }
@@ -630,7 +639,7 @@ function MainApp() {
   // Local Storage fallback
   useEffect(() => {
     if (!user && isAuthReady) {
-      localStorage.setItem('taiwan_stocks', JSON.stringify(stocks));
+      safeStorage.setItem('taiwan_stocks', JSON.stringify(stocks));
     }
   }, [stocks, user, isAuthReady]);
 
@@ -921,13 +930,13 @@ function MainApp() {
           const finalReplaceList = successfulItems.map(i => i.entry);
           setStocks(finalReplaceList);
           if (!user) {
-            localStorage.setItem('taiwan_stocks', JSON.stringify(finalReplaceList));
+            safeStorage.setItem('taiwan_stocks', JSON.stringify(finalReplaceList));
           }
           alert(`🎉 成功取代並更新 ${successfulItems.length} 檔持股！舊持股已清空，股息數據已同步。`);
         } else {
           setStocks(workingStocksList);
           if (!user) {
-            localStorage.setItem('taiwan_stocks', JSON.stringify(workingStocksList));
+            safeStorage.setItem('taiwan_stocks', JSON.stringify(workingStocksList));
           }
           alert(`🎉 成功寫入 ${successfulItems.length} 檔持股！股息與市值數據已自動同步。`);
         }
@@ -1022,7 +1031,7 @@ function MainApp() {
         handleFirestoreError(err as any, OperationType.WRITE, `users/${user.uid}/cash`);
       }
     } else {
-      localStorage.setItem('taiwan_cash', newCash.toString());
+      safeStorage.setItem('taiwan_cash', newCash.toString());
     }
   };
 
@@ -1255,7 +1264,7 @@ function MainApp() {
       
       if (!user) {
         setStocks(updatedStocks);
-        localStorage.setItem('taiwan_stocks', JSON.stringify(updatedStocks));
+        safeStorage.setItem('taiwan_stocks', JSON.stringify(updatedStocks));
       }
     } catch (err) {
       setError('更新失敗，請稍後再試。');
@@ -1428,11 +1437,17 @@ function MainApp() {
           const typeStr = event.type === 'ex-dividend' ? '除息日' : '領息日';
           const amountStr = event.type === 'payment' ? `預計領取 $${Math.round(event.amount).toLocaleString()}` : `每股 $${event.amount}`;
           
-          new Notification(`今日股息提醒: ${event.stockName}`, {
-            body: `今天是 ${event.stockName} 的 ${typeStr}！${amountStr}`,
-            icon: '/favicon.ico',
-            tag: `${event.symbol}-${event.type}`
-          });
+          try {
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+              new Notification(`今日股息提醒: ${event.stockName}`, {
+                body: `今天是 ${event.stockName} 的 ${typeStr}！${amountStr}`,
+                icon: '/favicon.svg',
+                tag: `${event.symbol}-${event.type}`
+              });
+            }
+          } catch (notifErr) {
+            console.warn('[Notification] Mobile notification unsupported or failed:', notifErr);
+          }
         });
       }
     }, timeUntilTarget);
@@ -1812,8 +1827,8 @@ function MainApp() {
         handleFirestoreError(err as any, OperationType.WRITE, `users/${user.uid}/telegram`);
       }
     } else {
-      localStorage.setItem('telegram_bot_token', token);
-      localStorage.setItem('telegram_chat_id', chatId);
+      safeStorage.setItem('telegram_bot_token', token);
+      safeStorage.setItem('telegram_chat_id', chatId);
     }
 
     // 動態向 Telegram 註冊此 Webhook，實現雙向即時對話
@@ -1930,17 +1945,21 @@ function MainApp() {
   });
   const [apiUsage, setApiUsage] = useState<{ count: number, date: string }>({ count: 0, date: new Date().toDateString() });
 
-  // Load API usage from localStorage
+  // Load API usage from safeStorage
   useEffect(() => {
-    const savedUsage = localStorage.getItem('api_usage_stats');
+    const savedUsage = safeStorage.getItem('api_usage_stats');
     if (savedUsage) {
-      const parsed = JSON.parse(savedUsage);
-      if (parsed.date === new Date().toDateString()) {
-        setApiUsage(parsed);
-      } else {
-        const newUsage = { count: 0, date: new Date().toDateString() };
-        setApiUsage(newUsage);
-        localStorage.setItem('api_usage_stats', JSON.stringify(newUsage));
+      try {
+        const parsed = JSON.parse(savedUsage);
+        if (parsed.date === new Date().toDateString()) {
+          setApiUsage(parsed);
+        } else {
+          const newUsage = { count: 0, date: new Date().toDateString() };
+          setApiUsage(newUsage);
+          safeStorage.setItem('api_usage_stats', JSON.stringify(newUsage));
+        }
+      } catch {
+        // ignore JSON parse error
       }
     }
   }, []);
@@ -1948,7 +1967,7 @@ function MainApp() {
   const incrementApiUsage = () => {
     setApiUsage(prev => {
       const next = { ...prev, count: prev.count + 1 };
-      localStorage.setItem('api_usage_stats', JSON.stringify(next));
+      safeStorage.setItem('api_usage_stats', JSON.stringify(next));
       return next;
     });
   };
@@ -3427,11 +3446,15 @@ function MainApp() {
                                                 )}>
                                                   <div className="flex justify-between items-center px-1 mb-1">
                                                     <span className="text-[10px] font-bold text-slate-400">主要成分股權重</span>
-                                                    {stock.dividendInfo.etfComponentsUpdatedAt && (
-                                                      <span className="text-[8px] text-slate-400">
-                                                        更新於: {new Date(stock.dividendInfo.etfComponentsUpdatedAt).toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit' })}
-                                                      </span>
-                                                    )}
+                                                    {stock.dividendInfo.etfComponentsUpdatedAt && (() => {
+                                                      const d = new Date(stock.dividendInfo.etfComponentsUpdatedAt);
+                                                      if (isNaN(d.getTime())) return null;
+                                                      return (
+                                                        <span className="text-[8px] text-slate-400">
+                                                          更新於: {d.toLocaleDateString('zh-TW', { month: '2-digit', day: '2-digit' })}
+                                                        </span>
+                                                      );
+                                                    })()}
                                                   </div>
                                                   {(() => {
                                                     const comps = stock.dividendInfo.etfComponents || stock.dividendInfo.topComponents || [];

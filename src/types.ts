@@ -22,6 +22,8 @@ export type DividendInfo = {
   topComponents?: EtfComponent[];
   etfComponents?: EtfComponent[];
   etfComponentsUpdatedAt?: string;
+  frequency?: string;
+  dividendHistory?: any[];
   source?: string;
   sourceUrl?: string;
   isPaymentDateEstimated?: boolean;
@@ -36,6 +38,7 @@ export type StockEntry = {
   cost?: number; // Average purchase price per share
   sellPrice?: number; // Selling price per share for realized profit calculation
   soldShares?: number; // Shares sold when cleared
+  manualDividendAdjustment?: number;
   dividendInfo?: DividendInfo;
 }
 
