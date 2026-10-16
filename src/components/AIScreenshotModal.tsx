@@ -300,7 +300,15 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
   const allSelected = parsedList.length > 0 && parsedList.every(i => i.selected);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto">
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
+      style={{
+        paddingTop: 'max(12px, env(safe-area-inset-top, 0px))',
+        paddingBottom: 'max(12px, env(safe-area-inset-bottom, 0px))',
+        paddingLeft: 'max(12px, env(safe-area-inset-left, 0px))',
+        paddingRight: 'max(12px, env(safe-area-inset-right, 0px))',
+      }}
+    >
       <div 
         className={`relative w-full max-w-2xl rounded-2xl shadow-2xl border transition-all my-auto overflow-hidden ${
           darkMode ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-800'

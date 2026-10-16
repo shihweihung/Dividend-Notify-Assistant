@@ -6,13 +6,15 @@
     <title>息引力 - 您的台股股息管家</title>
     <meta name="description" content="全方位台股除息領息行事曆、個人資產成長與股息管理工具" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="息引力" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=3" />
     <link rel="apple-touch-icon" href="/favicon.svg?v=3" />
     <link rel="apple-touch-icon" sizes="180x180" href="/favicon.svg?v=3" />
     <link rel="manifest" href="/manifest.json?v=3" />
-    <meta name="theme-color" content="#6366f1" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a" />
+    <meta name="theme-color" content="#ffffff" />
     <style>
       /* Instant Splash Screen Styles - zero dependency, works before any CSS/JS loads */
       @media (prefers-color-scheme: dark) {
@@ -33,6 +35,7 @@
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
         -webkit-font-smoothing: antialiased;
         min-height: 100vh;
+        min-height: 100dvh;
       }
       #initial-loader {
         position: fixed;
@@ -42,6 +45,10 @@
         align-items: center;
         justify-content: center;
         padding: 24px;
+        padding-top: calc(24px + env(safe-area-inset-top, 0px));
+        padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+        padding-left: calc(24px + env(safe-area-inset-left, 0px));
+        padding-right: calc(24px + env(safe-area-inset-right, 0px));
         z-index: 9999;
       }
       .splash-card {

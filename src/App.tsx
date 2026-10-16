@@ -426,6 +426,11 @@ function MainApp() {
     } else {
       document.documentElement.classList.remove('dark');
     }
+    const themeColorMetas = document.querySelectorAll('meta[name="theme-color"]');
+    const color = darkMode ? '#0f172a' : '#ffffff';
+    themeColorMetas.forEach(meta => {
+      meta.setAttribute('content', color);
+    });
   }, [darkMode]);
 
   // Notifications Enabled State persistence
@@ -2000,16 +2005,34 @@ function MainApp() {
   const nextMonth = () => setCurrentMonth(addMonths(currentMonth, 1));
 
   return (
-    <div className={cn(
-      "min-h-screen font-sans transition-colors duration-300",
-      darkMode ? "bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"
-    )}>
-      <div className="pb-10">
+    <div 
+      className={cn(
+        "min-h-screen font-sans transition-colors duration-300",
+        darkMode ? "bg-slate-950 text-slate-100" : "bg-slate-50 text-slate-900"
+      )}
+      style={{
+        paddingLeft: 'env(safe-area-inset-left, 0px)',
+        paddingRight: 'env(safe-area-inset-right, 0px)',
+      }}
+    >
+      <div 
+        className="pb-10"
+        style={{
+          paddingBottom: 'calc(2.5rem + env(safe-area-inset-bottom, 0px))',
+        }}
+      >
         {/* Header Section */}
-        <header className={cn(
-          "border-b sticky top-0 z-30 shadow-sm transition-colors duration-300",
-          darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
-        )}>
+        <header 
+          className={cn(
+            "border-b sticky top-0 z-30 shadow-sm transition-colors duration-300",
+            darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
+          )}
+          style={{
+            paddingTop: 'env(safe-area-inset-top, 0px)',
+            paddingLeft: 'env(safe-area-inset-left, 0px)',
+            paddingRight: 'env(safe-area-inset-right, 0px)',
+          }}
+        >
           <div className="max-w-4xl mx-auto px-4 py-3">
             <div className="flex justify-between items-center mb-3">
               <div className="flex items-center gap-2">
@@ -3949,7 +3972,15 @@ function MainApp() {
         {/* Clear / Delete Stock Confirmation Modal */}
         <AnimatePresence>
           {stockToDelete && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+            <div 
+              className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+              style={{
+                paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
+                paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
+                paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))',
+                paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
+              }}
+            >
               <motion.div
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
