@@ -86,6 +86,7 @@ export async function fetchDividendData(symbol: string): Promise<DividendInfo | 
     updatedAt: new Date().toISOString(),
     isPaymentDateEstimated: twseData.isPaymentDateEstimated,
     status: twseData.status,
-    history: twseData.history || []
+    history: twseData.history || [],
+    dividendHistory: twseData.history || []
   };
 }

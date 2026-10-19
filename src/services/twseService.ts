@@ -175,6 +175,52 @@ export async function fetchDividendFromHiStock(symbol: string): Promise<any[]> {
 }
 
 /**
+ * 從 MoneyDJ 抓取 ETF 官方除息歷史與即時預告資料
+ */
+export async function fetchDividendListFromMoneyDj(symbol: string): Promise<{ date: string, amount: number, year: number, paymentDate: string }[]> {
+  try {
+    const cleanSymbol = symbol.trim().toUpperCase();
+    const url = `https://www.moneydj.com/ETF/X/Basic/Basic0005.xdjhtm?etfid=${cleanSymbol}.TW`;
+    console.log(`[MoneyDJ Dividend] 正在抓取 ETF 除息表: ${url}`);
+    const res = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      timeout: 10000
+    });
+    const $ = cheerio.load(res.data);
+    const dividends: { date: string, amount: number, year: number, paymentDate: string }[] = [];
+    $('table tr').each((i, el) => {
+      const tds = $(el).find('td');
+      if (tds.length >= 6) {
+        const exDateText = $(tds[1]).text().trim();
+        const payDateText = $(tds[3]).text().trim();
+        const amountText = $(tds[5]).text().trim();
+        if (/^\d{4}\/\d{2}\/\d{2}$/.test(exDateText)) {
+          const amount = parseFloat(amountText) || 0;
+          if (amount > 0) {
+            const exDate = exDateText.replace(/\//g, '-');
+            const payDate = /^\d{4}\/\d{2}\/\d{2}$/.test(payDateText) ? payDateText.replace(/\//g, '-') : '';
+            dividends.push({
+              date: exDate,
+              paymentDate: payDate,
+              amount,
+              year: parseInt(exDate.split('-')[0])
+            });
+          }
+        }
+      }
+    });
+    console.log(`[MoneyDJ Dividend] 成功抓取 ${cleanSymbol} 除息表 ${dividends.length} 筆`);
+    return dividends;
+  } catch (error: any) {
+    console.warn(`[MoneyDJ Dividend] 抓取 ${symbol} 失敗: ${error.message || error}`);
+    return [];
+  }
+}
+
+/**
  * 從 Yahoo 股市抓取即時股價
  */
 export async function fetchPriceFromYahoo(symbol: string): Promise<{ price: number, name: string } | null> {
@@ -319,9 +365,15 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
 
     if (currentPrice === 0) return null;
 
-    // 2. 抓取除權息資料
-    const hiStockDividends = await fetchDividendFromHiStock(finalSymbol);
-    const yahooDividends = await fetchDividendListFromYahoo(finalSymbol, isOtc);
+    // 2. 抓取除權息資料 (整合 HiStock、Yahoo 與 MoneyDJ ETF 官方配息表)
+    const isEtfSymbol = (finalSymbol.startsWith('00') || cleanSymbol.startsWith('00')) && 
+                        ((finalSymbol.length >= 4 && finalSymbol.length <= 6) || (cleanSymbol.length >= 4 && cleanSymbol.length <= 6));
+
+    const [hiStockDividends, yahooDividends, moneyDjDividends] = await Promise.all([
+      fetchDividendFromHiStock(finalSymbol),
+      fetchDividendListFromYahoo(finalSymbol, isOtc),
+      isEtfSymbol ? fetchDividendListFromMoneyDj(finalSymbol) : Promise.resolve([])
+    ]);
     
     let exDate = "";
     let amount = 0;
@@ -337,14 +389,36 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
     const todayMoment = moment().tz('Asia/Taipei');
     const todayStr = todayMoment.format('YYYY-MM-DD');
 
-    // 整合 HiStock 與 Yahoo 的資料
+    // 整合各資料來源
     const allDividends = [...(hiStockDividends || [])];
+
+    // 整合 MoneyDJ ETF 官方除權息資料 (MoneyDJ 擁有最權威即時的 ETF 除息日與發放日)
+    if (moneyDjDividends && moneyDjDividends.length > 0) {
+      moneyDjDividends.forEach(md => {
+        const existing = allDividends.find(d => d.date === md.date);
+        if (!existing) {
+          allDividends.push({
+            date: md.date,
+            amount: md.amount,
+            year: md.year,
+            paymentDate: md.paymentDate
+          });
+        } else {
+          if (md.paymentDate && !existing.paymentDate) {
+            existing.paymentDate = md.paymentDate;
+          }
+          if (md.amount > 0 && (!existing.amount || existing.amount === 0)) {
+            existing.amount = md.amount;
+          }
+        }
+      });
+    }
     
     // 如果 Yahoo 有最新或歷史資料，整合進來
     if (yahooDividends && yahooDividends.length > 0) {
       yahooDividends.forEach(yd => {
-        const exists = allDividends.some(d => d.date === yd.date);
-        if (!exists) {
+        const existing = allDividends.find(d => d.date === yd.date);
+        if (!existing) {
           allDividends.push({
             date: yd.date,
             amount: yd.amount,
@@ -353,8 +427,7 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
           });
         } else {
           // 如果已存在，更新發放日資訊
-          const existing = allDividends.find(d => d.date === yd.date);
-          if (existing && yd.paymentDate) {
+          if (yd.paymentDate && !existing.paymentDate) {
             existing.paymentDate = yd.paymentDate;
           }
         }
@@ -365,11 +438,14 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
     const sortedDividends = [...allDividends].sort((a, b) => b.date.localeCompare(a.date));
 
     if (sortedDividends.length > 0) {
-      // 找出「今年或未來」最新的除息資訊
-      const currentOrFuture = sortedDividends.find(d => {
+      // 找出除息資訊：優先找出未來即將除息者（日期 >= 今日）；若無則取最新一次除息紀錄
+      const upcoming = sortedDividends.slice().reverse().find(d => d.date >= todayStr) || 
+                       sortedDividends.find(d => d.date >= todayStr);
+
+      const currentOrFuture = upcoming || sortedDividends.find(d => {
         const year = parseInt(d.date.split('-')[0]);
         return year >= currentYear;
-      });
+      }) || sortedDividends[0];
 
       if (currentOrFuture) {
         exDate = currentOrFuture.date; 

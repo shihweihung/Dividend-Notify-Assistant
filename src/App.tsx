@@ -101,14 +101,17 @@ function cn(...inputs: ClassValue[]) {
 
 const authenticatedFetch = async (url: string, options: RequestInit = {}) => {
   const user = auth.currentUser;
-  if (!user) {
-    throw new Error('User not authenticated');
-  }
-  const token = await user.getIdToken();
-  const headers = {
-    ...options.headers,
-    'Authorization': `Bearer ${token}`,
+  const headers: Record<string, string> = {
+    ...((options.headers as Record<string, string>) || {})
   };
+  if (user) {
+    try {
+      const token = await user.getIdToken();
+      headers['Authorization'] = `Bearer ${token}`;
+    } catch (e) {
+      console.warn('Failed to get auth token:', e);
+    }
+  }
   return fetch(url, { ...options, headers });
 };
 
@@ -152,6 +155,8 @@ function MainApp() {
   const [isLoading, setIsLoading] = useState(false);
   const [refreshingStocks, setRefreshingStocks] = useState<Set<string>>(new Set());
   const [currentMonth, setCurrentMonth] = useState(new Date());
+  const [selectedCalendarDate, setSelectedCalendarDate] = useState<Date | null>(null);
+  const [calendarTab, setCalendarTab] = useState<'month' | 'day'>('month');
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [expandedEtf, setExpandedEtf] = useState<Set<string>>(new Set());
@@ -656,20 +661,42 @@ function MainApp() {
     }
   }, [stocks, user, isAuthReady]);
 
-  // Auto-heal stale dividend data due to earlier Minguo year bug or older caches
+  // Intelligent background auto-refresh for stale dividend data and expired ex-dates
   useEffect(() => {
     if (isAuthReady && stocks.length > 0 && !hasAutoRefreshed && !isLoading) {
-      const fixTime = new Date("2026-06-30T07:10:00Z").getTime();
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      const lastAutoRefresh = safeStorage.getItem('last_auto_dividend_refresh');
+      const threeHoursAgo = Date.now() - 3 * 60 * 60 * 1000;
+      const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+
+      const hasExpiredExDate = stocks.some(stock => 
+        stock.dividendInfo?.exDividendDate && 
+        stock.dividendInfo.exDividendDate < todayStr &&
+        stock.dividendInfo.source !== '手動輸入'
+      );
+
+      const isThrottlePassed = !lastAutoRefresh || 
+        Number(lastAutoRefresh) < threeHoursAgo || 
+        (hasExpiredExDate && Number(lastAutoRefresh) < fiveMinutesAgo);
+
       const needsRefresh = stocks.some(stock => {
         if (!stock.dividendInfo) return true;
         if (stock.dividendInfo.source === '手動輸入') return false;
         if (!stock.dividendInfo.updatedAt) return true;
-        return new Date(stock.dividendInfo.updatedAt).getTime() < fixTime;
+        const updateAge = Date.now() - new Date(stock.dividendInfo.updatedAt).getTime();
+        // Stale if last updated more than 24 hours ago
+        if (updateAge > 24 * 60 * 60 * 1000) return true;
+        // Or if the recorded ex-dividend date has already passed and data is more than 30 minutes old
+        if (stock.dividendInfo.exDividendDate && stock.dividendInfo.exDividendDate < todayStr && updateAge > 30 * 60 * 1000) {
+          return true;
+        }
+        return false;
       });
 
-      if (needsRefresh) {
+      if (needsRefresh && isThrottlePassed) {
         setHasAutoRefreshed(true);
-        console.log("Stale or buggy dividend format detected. Triggering silent background auto-refresh to heal database...");
+        safeStorage.setItem('last_auto_dividend_refresh', Date.now().toString());
+        console.log("Stale dividend data or expired ex-dividend date detected. Triggering silent background auto-refresh...");
         handleRefreshAll();
       }
     }
@@ -1340,16 +1367,21 @@ function MainApp() {
 
   const calendarEvents = useMemo(() => {
     const events: CalendarEvent[] = [];
-    const currentYear = new Date().getFullYear();
     
     stocks.forEach(stock => {
       if (stock.dividendInfo) {
-        // If the full dividend history exists, populate all events of the current year from history
-        if (stock.dividendInfo.history && Array.isArray(stock.dividendInfo.history) && stock.dividendInfo.history.length > 0) {
+        const historyList = (stock.dividendInfo.history && Array.isArray(stock.dividendInfo.history) && stock.dividendInfo.history.length > 0)
+          ? stock.dividendInfo.history
+          : (stock.dividendInfo.dividendHistory && Array.isArray(stock.dividendInfo.dividendHistory) && stock.dividendInfo.dividendHistory.length > 0)
+            ? stock.dividendInfo.dividendHistory
+            : null;
+
+        // If dividend history exists, populate all events from history
+        if (historyList && historyList.length > 0) {
           const seenExDates = new Set<string>();
           const seenPayDates = new Set<string>();
 
-          stock.dividendInfo.history.forEach(div => {
+          historyList.forEach(div => {
             const exDateStr = div.date; // YYYY-MM-DD
             let payDateStr = div.paymentDate || div.payDate; // YYYY-MM-DD
 
@@ -1369,7 +1401,7 @@ function MainApp() {
             const exDate = exDateStr ? parseISO(exDateStr) : null;
             const payDate = payDateStr ? parseISO(payDateStr) : null;
 
-            if (exDate && !isNaN(exDate.getTime()) && exDate.getFullYear() === currentYear) {
+            if (exDate && !isNaN(exDate.getTime())) {
               const exKey = `${stock.symbol}-${exDateStr}`;
               if (!seenExDates.has(exKey)) {
                 seenExDates.add(exKey);
@@ -1383,7 +1415,7 @@ function MainApp() {
               }
             }
 
-            if (payDate && !isNaN(payDate.getTime()) && payDate.getFullYear() === currentYear) {
+            if (payDate && !isNaN(payDate.getTime())) {
               const payKey = `${stock.symbol}-${payDateStr}`;
               if (!seenPayDates.has(payKey)) {
                 seenPayDates.add(payKey);
@@ -1398,29 +1430,40 @@ function MainApp() {
               }
             }
           });
-        } else {
-          // Fallback to top-level single event
-          const exDate = stock.dividendInfo.exDividendDate ? parseISO(stock.dividendInfo.exDividendDate) : null;
-          const payDate = stock.dividendInfo.paymentDate ? parseISO(stock.dividendInfo.paymentDate) : null;
+        }
 
-          if (exDate && !isNaN(exDate.getTime()) && exDate.getFullYear() === currentYear) {
-            events.push({
-              date: exDate,
-              type: 'ex-dividend',
-              stockName: stock.name,
-              symbol: stock.symbol,
-              amount: stock.dividendInfo.amount
-            });
+        // Always ensure top-level exDividendDate is present
+        if (stock.dividendInfo.exDividendDate) {
+          const exDate = parseISO(stock.dividendInfo.exDividendDate);
+          if (exDate && !isNaN(exDate.getTime())) {
+            const alreadyAdded = events.some(e => e.symbol === stock.symbol && e.type === 'ex-dividend' && isSameDay(e.date, exDate));
+            if (!alreadyAdded) {
+              events.push({
+                date: exDate,
+                type: 'ex-dividend',
+                stockName: stock.name,
+                symbol: stock.symbol,
+                amount: stock.dividendInfo.amount
+              });
+            }
           }
-          if (payDate && !isNaN(payDate.getTime()) && payDate.getFullYear() === currentYear) {
-            const effectiveShares = getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate || '', stock.shares);
-            events.push({
-              date: payDate,
-              type: 'payment',
-              stockName: stock.name,
-              symbol: stock.symbol,
-              amount: stock.dividendInfo.amount * effectiveShares
-            });
+        }
+
+        // Always ensure top-level paymentDate is present
+        if (stock.dividendInfo.paymentDate) {
+          const payDate = parseISO(stock.dividendInfo.paymentDate);
+          if (payDate && !isNaN(payDate.getTime())) {
+            const alreadyAdded = events.some(e => e.symbol === stock.symbol && e.type === 'payment' && isSameDay(e.date, payDate));
+            if (!alreadyAdded) {
+              const effectiveShares = getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate || '', stock.shares);
+              events.push({
+                date: payDate,
+                type: 'payment',
+                stockName: stock.name,
+                symbol: stock.symbol,
+                amount: stock.dividendInfo.amount * effectiveShares
+              });
+            }
           }
         }
       }
@@ -2734,11 +2777,16 @@ function MainApp() {
                     return (
                       <div 
                         key={idx} 
+                        onClick={() => {
+                          setSelectedCalendarDate(prev => prev && isSameDay(prev, day) ? null : day);
+                          setCalendarTab('day');
+                        }}
                         className={cn(
-                          "min-h-[50px] p-0.5 sm:p-1 rounded-lg border transition-colors flex flex-col justify-between",
+                          "min-h-[50px] p-0.5 sm:p-1 rounded-lg border transition-all flex flex-col justify-between cursor-pointer active:scale-98",
                           isCurrentMonth 
-                            ? (darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-50")
-                            : (darkMode ? "bg-slate-950/30 border-transparent opacity-20" : "bg-slate-50/30 border-transparent opacity-30")
+                            ? (darkMode ? "bg-slate-900 border-slate-800 hover:border-slate-700" : "bg-white border-slate-50 hover:border-slate-200")
+                            : (darkMode ? "bg-slate-950/30 border-transparent opacity-20" : "bg-slate-50/30 border-transparent opacity-30"),
+                          selectedCalendarDate && isSameDay(day, selectedCalendarDate) && "ring-2 ring-indigo-500 border-indigo-500 shadow-sm"
                         )}
                       >
                         <div className="flex justify-between items-start">
@@ -2777,52 +2825,104 @@ function MainApp() {
                 </div>
               </div>
 
-              {/* Event List - Compact */}
+              {/* Event List - with Month View and Day View */}
               <div className="space-y-2">
-                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest px-1">本日行程</h3>
-                {(() => {
-                  const todayEvents = [...calendarEvents]
-                    .filter(e => isSameDay(e.date, new Date()))
-                    .sort((a, b) => a.date.getTime() - b.date.getTime());
+                <div className="flex justify-between items-center px-1">
+                  <div className="flex gap-1.5 items-center">
+                    <button
+                      onClick={() => setCalendarTab('month')}
+                      className={cn(
+                        "text-xs font-black uppercase tracking-wider px-2.5 py-1 rounded-lg transition-all cursor-pointer",
+                        calendarTab === 'month'
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : darkMode ? "text-slate-400 hover:text-slate-200" : "text-slate-500 hover:text-slate-800"
+                      )}
+                    >
+                      本月除權息一覽 ({calendarEvents.filter(e => isSameMonth(e.date, currentMonth)).length})
+                    </button>
+                    <button
+                      onClick={() => setCalendarTab('day')}
+                      className={cn(
+                        "text-xs font-black uppercase tracking-wider px-2.5 py-1 rounded-lg transition-all cursor-pointer",
+                        calendarTab === 'day'
+                          ? "bg-indigo-600 text-white shadow-xs"
+                          : darkMode ? "text-slate-400 hover:text-slate-200" : "text-slate-500 hover:text-slate-800"
+                      )}
+                    >
+                      {selectedCalendarDate ? `${format(selectedCalendarDate, 'MM/dd')} 行程` : '本日行程'}
+                    </button>
+                  </div>
+                  {selectedCalendarDate && calendarTab === 'day' && (
+                    <button
+                      onClick={() => setSelectedCalendarDate(null)}
+                      className="text-[10px] font-bold text-indigo-500 hover:underline cursor-pointer"
+                    >
+                      查看今日
+                    </button>
+                  )}
+                </div>
 
-                  if (todayEvents.length === 0) {
+                {(() => {
+                  const targetDate = selectedCalendarDate || new Date();
+                  const eventsToShow = calendarTab === 'month'
+                    ? [...calendarEvents]
+                        .filter(e => isSameMonth(e.date, currentMonth))
+                        .sort((a, b) => a.date.getTime() - b.date.getTime())
+                    : [...calendarEvents]
+                        .filter(e => isSameDay(e.date, targetDate))
+                        .sort((a, b) => a.date.getTime() - b.date.getTime());
+
+                  if (eventsToShow.length === 0) {
                     return (
                       <div className={cn(
-                        "p-3 rounded-xl border text-center text-xs font-bold text-slate-400",
+                        "p-4 rounded-xl border text-center text-xs font-bold text-slate-400 space-y-1",
                         darkMode ? "bg-slate-900/50 border-slate-800" : "bg-white/80 border-slate-100"
                       )}>
-                        今日無除息或發發配息行程
+                        <p>{calendarTab === 'month' ? `${format(currentMonth, 'yyyy年MM月')} 尚無除權息或發放行程` : `${format(targetDate, 'MM月dd日')} 當日無除息或配息行程`}</p>
+                        <p className="text-[10px] opacity-75 font-normal">若剛公佈最新除息，可點擊上方重新整理按鈕更新數據</p>
                       </div>
                     );
                   }
 
-                  return todayEvents.map((event, idx) => (
-                    <div key={idx} className={cn(
-                      "p-3 rounded-xl shadow-sm border flex items-center gap-3 transition-colors",
-                      darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
-                    )}>
-                      <div className={cn(
-                        "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
-                        event.type === 'ex-dividend' 
-                          ? (darkMode ? "bg-orange-950/40" : "bg-orange-50")
-                          : (darkMode ? "bg-emerald-950/40" : "bg-emerald-50")
+                  return eventsToShow.map((event, idx) => {
+                    const isUpcomingEvent = event.date >= new Date(new Date().setHours(0,0,0,0));
+                    return (
+                      <div key={idx} className={cn(
+                        "p-3 rounded-xl shadow-sm border flex items-center gap-3 transition-colors",
+                        darkMode ? "bg-slate-900 border-slate-800" : "bg-white border-slate-100"
                       )}>
-                        {event.type === 'ex-dividend' ? <CalendarIcon className="w-4 h-4 text-orange-500" /> : <DollarSign className="w-4 h-4 text-emerald-500" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex justify-between items-start">
-                          <p className={cn(
-                            "text-xs font-black truncate",
-                            darkMode ? "text-slate-100" : "text-slate-800"
-                          )}>{event.stockName} ({event.symbol})</p>
-                          <p className="text-[10px] font-bold text-slate-400">{format(event.date, 'MM/dd')}</p>
+                        <div className={cn(
+                          "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
+                          event.type === 'ex-dividend' 
+                            ? (darkMode ? "bg-orange-950/40" : "bg-orange-50")
+                            : (darkMode ? "bg-emerald-950/40" : "bg-emerald-50")
+                        )}>
+                          {event.type === 'ex-dividend' ? <CalendarIcon className="w-4 h-4 text-orange-500" /> : <DollarSign className="w-4 h-4 text-emerald-500" />}
                         </div>
-                        <p className="text-[10px] text-slate-500 font-medium">
-                          {event.type === 'ex-dividend' ? `除息 $${event.amount}` : `發放 $${event.amount ? event.amount.toLocaleString() : 0}`}
-                        </p>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex justify-between items-start gap-1">
+                            <p className={cn(
+                              "text-xs font-black truncate",
+                              darkMode ? "text-slate-100" : "text-slate-800"
+                            )}>
+                              {event.stockName} ({event.symbol})
+                            </p>
+                            <div className="flex items-center gap-1 shrink-0">
+                              {isUpcomingEvent && (
+                                <span className="px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-500 text-[9px] font-black border border-amber-500/20">
+                                  即將到來
+                                </span>
+                              )}
+                              <p className="text-[10px] font-bold text-slate-400">{format(event.date, 'MM/dd (eee)', { locale: zhTW })}</p>
+                            </div>
+                          </div>
+                          <p className="text-[10px] text-slate-500 font-medium">
+                            {event.type === 'ex-dividend' ? `除息每股 $${event.amount}` : `預計發放 $${event.amount ? Math.round(event.amount).toLocaleString() : 0}`}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                  ));
+                    );
+                  });
                 })()}
               </div>
 
@@ -3342,6 +3442,25 @@ function MainApp() {
                                             {stock.shares === 0 && (
                                               <span className="px-1.5 py-0.5 rounded-md bg-slate-500/20 text-slate-400 text-[8px] font-black shrink-0">已清倉</span>
                                             )}
+                                            {/* 即將除息 Badge */}
+                                            {(() => {
+                                              const exDateStr = stock.dividendInfo?.exDividendDate;
+                                              if (!exDateStr) return null;
+                                              const todayStr = format(new Date(), 'yyyy-MM-dd');
+                                              const isUpcoming = exDateStr >= todayStr;
+                                              const dateLabel = exDateStr.slice(5).replace('-', '/');
+                                              return (
+                                                <span className={cn(
+                                                  "px-1.5 py-0.5 rounded-md text-[8.5px] font-black shrink-0 flex items-center gap-0.5 border",
+                                                  isUpcoming 
+                                                    ? "bg-orange-500/15 text-orange-600 dark:text-orange-400 border-orange-500/30 font-mono" 
+                                                    : "bg-slate-500/10 text-slate-400 border-slate-500/20 font-mono opacity-80"
+                                                )}>
+                                                  📅 {isUpcoming ? '即將除息 ' : '除息日 '}{dateLabel}
+                                                  {stock.dividendInfo?.amount ? ` ($${stock.dividendInfo.amount})` : ''}
+                                                </span>
+                                              );
+                                            })()}
                                             {(() => {
                                               if (stock.shares > 0 && stock.cost && stock.cost > 0 && curPrice > 0) {
                                                 const dropPct = (stock.cost - curPrice) / stock.cost;

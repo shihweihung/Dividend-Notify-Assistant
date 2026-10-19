@@ -411,6 +411,19 @@ async function startServer() {
     }
   };
 
+  const optionalFirebaseAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const idToken = req.headers.authorization?.split('Bearer ')[1];
+    if (idToken) {
+      try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        (req as any).user = decodedToken;
+      } catch (error) {
+        // Proceed as guest
+      }
+    }
+    next();
+  };
+
   async function updateAllUserStocks() {
     if (!adminDb || firestoreAvailable === false) {
       console.warn("[Stock Update] Firestore not accessible or initialized in this environment. Skipping global stock update.");
@@ -2190,15 +2203,9 @@ ${top10Json}
   // Trigger background poller for non-webhook bots
   startTelegramPolling();
 
-  // API: Fetch Dividend Data via Gemini
-  app.get("/api/dividend/:symbol", firebaseAuth, async (req, res) => {
+  // API: Fetch Dividend Data (Pure API + TWSE/MoneyDJ/Yahoo official data)
+  app.get("/api/dividend/:symbol", optionalFirebaseAuth, async (req, res) => {
     const symbol = (req.params.symbol || "").trim().toUpperCase();
-    const apiKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-    
-    if (!apiKey) {
-      console.error("SERVER ERROR: API Key is missing.");
-      return res.status(500).json({ error: "伺服器尚未設定 AI 金鑰，請聯繫管理員。" });
-    }
 
     try {
       const data = await fetchDividendData(symbol);
@@ -2207,8 +2214,8 @@ ${top10Json}
       }
       res.json(data);
     } catch (error) {
-      console.error("Server-side Gemini error:", error);
-      res.status(500).json({ error: error instanceof Error ? error.message : "AI 查詢失敗" });
+      console.error("Server-side dividend error:", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "查詢股利資訊失敗" });
     }
   });
 
