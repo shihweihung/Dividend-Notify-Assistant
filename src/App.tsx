@@ -661,23 +661,12 @@ function MainApp() {
     }
   }, [stocks, user, isAuthReady]);
 
-  // Intelligent background auto-refresh for stale dividend data and expired ex-dates
+  // Intelligent background auto-refresh for stale dividend data
   useEffect(() => {
     if (isAuthReady && stocks.length > 0 && !hasAutoRefreshed && !isLoading) {
-      const todayStr = format(new Date(), 'yyyy-MM-dd');
       const lastAutoRefresh = safeStorage.getItem('last_auto_dividend_refresh');
       const threeHoursAgo = Date.now() - 3 * 60 * 60 * 1000;
-      const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
-
-      const hasExpiredExDate = stocks.some(stock => 
-        stock.dividendInfo?.exDividendDate && 
-        stock.dividendInfo.exDividendDate < todayStr &&
-        stock.dividendInfo.source !== '手動輸入'
-      );
-
-      const isThrottlePassed = !lastAutoRefresh || 
-        Number(lastAutoRefresh) < threeHoursAgo || 
-        (hasExpiredExDate && Number(lastAutoRefresh) < fiveMinutesAgo);
+      const isThrottlePassed = !lastAutoRefresh || Number(lastAutoRefresh) < threeHoursAgo;
 
       const needsRefresh = stocks.some(stock => {
         if (!stock.dividendInfo) return true;
@@ -686,17 +675,13 @@ function MainApp() {
         const updateAge = Date.now() - new Date(stock.dividendInfo.updatedAt).getTime();
         // Stale if last updated more than 24 hours ago
         if (updateAge > 24 * 60 * 60 * 1000) return true;
-        // Or if the recorded ex-dividend date has already passed and data is more than 30 minutes old
-        if (stock.dividendInfo.exDividendDate && stock.dividendInfo.exDividendDate < todayStr && updateAge > 30 * 60 * 1000) {
-          return true;
-        }
         return false;
       });
 
       if (needsRefresh && isThrottlePassed) {
         setHasAutoRefreshed(true);
         safeStorage.setItem('last_auto_dividend_refresh', Date.now().toString());
-        console.log("Stale dividend data or expired ex-dividend date detected. Triggering silent background auto-refresh...");
+        console.log("Stale dividend data detected. Triggering silent background auto-refresh...");
         handleRefreshAll();
       }
     }

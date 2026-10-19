@@ -279,6 +279,37 @@ export async function fetchPriceFromYahoo(symbol: string): Promise<{ price: numb
   return null;
 }
 
+// 模組層清單快取（避免每次查詢各股重複下載整包清單，TTL 10 分鐘）
+const LIST_CACHE_TTL = 10 * 60 * 1000;
+let twseStockDayAllCache: { data: any[]; timestamp: number } | null = null;
+let tpexMainboardQuotesCache: { data: any[]; timestamp: number } | null = null;
+
+async function getTwseStockDayAll(): Promise<any[]> {
+  const now = Date.now();
+  if (twseStockDayAllCache && now - twseStockDayAllCache.timestamp < LIST_CACHE_TTL) {
+    return twseStockDayAllCache.data;
+  }
+  const res = await axios.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", { timeout: 10000 });
+  if (Array.isArray(res.data)) {
+    twseStockDayAllCache = { data: res.data, timestamp: now };
+    return res.data;
+  }
+  return [];
+}
+
+async function getTpexMainboardQuotes(): Promise<any[]> {
+  const now = Date.now();
+  if (tpexMainboardQuotesCache && now - tpexMainboardQuotesCache.timestamp < LIST_CACHE_TTL) {
+    return tpexMainboardQuotesCache.data;
+  }
+  const res = await axios.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", { timeout: 10000 });
+  if (Array.isArray(res.data)) {
+    tpexMainboardQuotesCache = { data: res.data, timestamp: now };
+    return res.data;
+  }
+  return [];
+}
+
 export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData | null> {
   try {
     const cleanSymbol = symbol.trim().toUpperCase();
@@ -294,9 +325,9 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
     // 先從證交所/上櫃清單比對，以取得正確的股號(Code)與股名(Name)
     // 這能解決輸入「長榮」或「上詮」但股號顯示中文名稱而非「2603」/「3363」的問題，也能避免直接用中文去查 Yahoo 報價導致 400 錯誤
     try {
-      const priceResTwse = await axios.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", { timeout: 10000 });
-      if (Array.isArray(priceResTwse.data)) {
-        priceTarget = priceResTwse.data.find((item: any) => 
+      const twseDataList = await getTwseStockDayAll();
+      if (Array.isArray(twseDataList)) {
+        priceTarget = twseDataList.find((item: any) => 
           item.Code?.toUpperCase() === cleanSymbol || 
           item.Name === cleanSymbol || 
           (cleanSymbol.length >= 2 && item.Name?.startsWith(cleanSymbol))
@@ -312,9 +343,9 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
 
     if (!priceTarget) {
       try {
-        const priceResTpex = await axios.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", { timeout: 10000 });
-        if (Array.isArray(priceResTpex.data)) {
-          priceTarget = priceResTpex.data.find((item: any) => 
+        const tpexDataList = await getTpexMainboardQuotes();
+        if (Array.isArray(tpexDataList)) {
+          priceTarget = tpexDataList.find((item: any) => 
             item.SecuritiesCompanyCode?.toUpperCase() === cleanSymbol || 
             item.CompanyName === cleanSymbol ||
             (cleanSymbol.length >= 2 && item.CompanyName?.startsWith(cleanSymbol))
@@ -392,7 +423,7 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
     // 整合各資料來源
     const allDividends = [...(hiStockDividends || [])];
 
-    // 整合 MoneyDJ ETF 官方除權息資料 (MoneyDJ 擁有最權威即時的 ETF 除息日與發放日)
+    // 整合 MoneyDJ ETF 除權息資料（HiStock 優先，MoneyDJ 僅補缺漏的發放日與金額）
     if (moneyDjDividends && moneyDjDividends.length > 0) {
       moneyDjDividends.forEach(md => {
         const existing = allDividends.find(d => d.date === md.date);
@@ -445,7 +476,7 @@ export async function fetchStockDataFromTwse(symbol: string): Promise<TwseData |
       const currentOrFuture = upcoming || sortedDividends.find(d => {
         const year = parseInt(d.date.split('-')[0]);
         return year >= currentYear;
-      }) || sortedDividends[0];
+      });
 
       if (currentOrFuture) {
         exDate = currentOrFuture.date; 
