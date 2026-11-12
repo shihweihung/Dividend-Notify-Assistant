@@ -1,4 +1,5 @@
-import { resolveSymbolFromName, mergeAndValidateStocks } from '../server.js';
+import { resolveSymbolFromName } from '../server/lib/symbols';
+import { mergeAndValidateStocks } from '../server/lib/portfolioMerge';
 
 function assertEqual(actual: any, expected: any, testName: string) {
   if (actual === expected) {
