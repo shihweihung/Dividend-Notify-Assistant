@@ -8,7 +8,7 @@
 - `server/context.ts`:共用狀態(adminDb、firestoreAvailable、in-memory fallback)
 - `server/lib/`:純函式,不碰網路與資料庫,必須有測試
   - `symbols.ts`(NAME_MAP、resolveSymbolFromName)、`portfolioMerge.ts`(mergeAndValidateStocks)、`dividendEvents.ts`(股息事件判斷)
-- `server/services/`:商業流程(每日批次、股息通知、舒洪道貼文、Telegram bot、截圖解析)
+- `server/services/`:商業流程(每日批次、股息通知、Telegram bot、截圖解析)
 - `server/routes/`:Express router,只做參數檢查與呼叫 service
 - 新增 API 時放進對應的 routes 檔,不要再寫回 server.ts
 - `npm test` 必須全部通過;改到 `server/lib/` 的邏輯要同步補 `tests/core.spec.ts`
@@ -45,6 +45,22 @@
 
 ### 6. 持股截圖含帳號與姓名
 原圖不可寫入 Cloud Storage、不可進 log、不可存進 Firestore,只保留解析後的結果。
+
+### 7. 領息金額以「除息日前一天」的持股計算
+使用者會隨時調整持股,領息通知不可直接用目前股數。
+- 股數取除息日前(不含當天)最後一份快照(`sharesBeforeExDate`);除息日當天才買的領不到
+- 除息後才賣掉的股票仍要發領息通知(`collectDividendCandidates` 會從快照找回來)
+- 找不到除息前快照時才用目前股數,且訊息必須註明「以目前持股估算」
+- 金額 = 股數 × 每股股利,元以下捨去,再扣匯費 10 元;不扣二代健保(使用者決定)
+- 相關邏輯放在 `server/lib/dividendEvents.ts`,測試在 `tests/core.spec.ts`、`tests/dividendNotify.spec.ts`
+
+## 使用情境(做取捨時的依據)
+- 使用者只有本人與少數家人,不需要為大量使用者設計
+- 優先順序:股息股數正確 > 花費最低 > 使用方便 > 效能
+- daily-batch 排程在台北時間下午 2 點(收盤後)執行,快照代表當天收盤後的持股
+
+## 已移除的功能
+- 舒洪道每日貼文草稿(2026-11 移除,使用者不再使用),不要再加回來
 
 ## 其他慣例
 - Gemini 一律用 Flash / Flash-Lite,Pro 會產生明顯 API 費用

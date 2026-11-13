@@ -1,8 +1,17 @@
 import moment from "moment-timezone";
 import { ctx } from "../context";
 import { normalizeSymbol } from "../lib/symbols";
-import { dedupeStocksBySymbol, findDividendEventsForDate } from "../lib/dividendEvents";
+import {
+  findDividendEventsForDate,
+  collectDividendCandidates,
+  sharesBeforeExDate,
+  buildPaymentMessage,
+  type HoldingSnapshot,
+} from "../lib/dividendEvents";
 import { sendTelegramMsg } from "./telegramApi";
+
+// 除息日到發放日通常 1～3 個月，最長約半年；多抓一些保險
+const SNAPSHOT_LOOKBACK_DAYS = 200;
 
 // Core Function: Run Dividend Ex-Date & Payment Date Push Notifications via Telegram
 export async function runDividendNotifyCore() {
@@ -15,11 +24,92 @@ export async function runDividendNotifyCore() {
   const taipeiTime = moment().tz("Asia/Taipei");
   const todayStr = taipeiTime.format("YYYY-MM-DD");
 
-
   let notificationsSent = 0;
   let logsCreated = 0;
   const processedChatIds = new Set<string>();
   const sentKeysInMemory = new Set<string>();
+
+  // 快照只讀最近這段期間：涵蓋「除息日前一天」到「發放日」之間的間隔，也用來找出已賣掉的持股
+  const snapshotCutoff = taipeiTime.clone().subtract(SNAPSHOT_LOOKBACK_DAYS, "days").format("YYYY-MM-DD");
+
+  const notifyHolder = async (holder: {
+    chatId: string;
+    botToken: string;
+    rawStocks: any[];
+    snapshotsRef: any;
+    logExtra: Record<string, any>;
+  }) => {
+    const { chatId, botToken, rawStocks, snapshotsRef, logExtra } = holder;
+
+    let snapshots: HoldingSnapshot[] = [];
+    try {
+      const snapDocs = await snapshotsRef.where("date", ">=", snapshotCutoff).get();
+      snapshots = snapDocs.docs.map((d: any) => d.data());
+    } catch (snapErr) {
+      console.warn(`[Snapshot Lookup Warning] Failed to load snapshots for ChatID ${chatId}:`, snapErr);
+    }
+
+    for (const { stock, holdsNow } of collectDividendCandidates(rawStocks, snapshots)) {
+      const symbol = normalizeSymbol(stock.symbol);
+      if (!symbol) continue;
+      const stockName = (stock.name && stock.name !== symbol) ? stock.name : symbol;
+      const info = stock.dividendInfo || stock;
+
+      for (const evt of findDividendEventsForDate(info, stock, todayStr)) {
+        // 除息提醒只發給目前還持有的股票；領息提醒則看除息日前的持股
+        if (evt.type === 'ex-dividend' && !holdsNow) continue;
+
+        let msgText = "";
+        if (evt.type === 'ex-dividend') {
+          msgText = `📅 今天是 ${stockName}(${symbol}) 的除息日！每股 $${evt.amount}`;
+        } else {
+          const snapShares = evt.exDateStr ? sharesBeforeExDate(snapshots, symbol, evt.exDateStr) : null;
+          if (snapShares === null && !holdsNow) continue; // 不知道當時股數，也不是目前持股，無從估算
+          const shares = snapShares === null ? (Number(stock.shares) || 0) : snapShares;
+          if (shares <= 0) {
+            console.log(`[Dividend Notify] ${symbol} not held before ex-date ${evt.exDateStr} for ChatID ${chatId}, no payment notice.`);
+            continue;
+          }
+          msgText = buildPaymentMessage({
+            stockName,
+            symbol,
+            amountPerShare: evt.amount,
+            shares,
+            sharesFromCurrentHoldings: snapShares === null,
+            payDateEstimated: evt.payDateEstimated,
+          });
+        }
+
+        const dedupDocId = `notify_${chatId}_${symbol}_${evt.type}_${todayStr}`;
+        if (sentKeysInMemory.has(dedupDocId)) {
+          console.log(`[Dividend Notify Dedup In-Memory] ${dedupDocId} already processed. Skipping.`);
+          continue;
+        }
+        sentKeysInMemory.add(dedupDocId);
+
+        const logRef = ctx.adminDb.collection("dividend_notify_log").doc(dedupDocId);
+        const logSnap = await logRef.get();
+        if (logSnap.exists) {
+          console.log(`[Dividend Notify Dedup DB] ${dedupDocId} already notified. Skipping.`);
+          continue;
+        }
+
+        console.log(`[Dividend Notify] Sending ${evt.type} notification for ${symbol} to ChatID ${chatId}`);
+        await sendTelegramMsg(botToken, chatId, msgText);
+        notificationsSent++;
+
+        await logRef.set({
+          ...logExtra,
+          chatId,
+          symbol,
+          type: evt.type,
+          date: todayStr,
+          sentAt: new Date().toISOString()
+        });
+        logsCreated++;
+      }
+    }
+  };
 
   try {
     // 1. Process authenticated users collection
@@ -33,77 +123,15 @@ export async function runDividendNotifyCore() {
       if (!chatId || !botToken) continue;
       processedChatIds.add(chatId);
 
-      const stocksSnapshot = await ctx.adminDb.collection("users").doc(userId).collection("stocks").get();
-      const rawStocks = stocksSnapshot.docs.map((d: any) => d.data());
-      
-      // Deduplicate stocks array by normalized symbol to avoid processing duplicate stock entries
-      const userStocks = dedupeStocksBySymbol(rawStocks);
-
-      for (const stock of userStocks) {
-        if (!stock) continue;
-        const symbol = normalizeSymbol(stock.symbol);
-        if (!symbol) continue;
-        const stockName = (stock.name && stock.name !== symbol) ? stock.name : symbol;
-        const shares = Number(stock.shares) || 0;
-        const info = stock.dividendInfo || stock;
-
-        const eventsToNotify = findDividendEventsForDate(info, stock, todayStr);
-
-        for (const evt of eventsToNotify) {
-          const dedupDocId = `notify_${chatId}_${symbol}_${evt.type}_${todayStr}`;
-          if (sentKeysInMemory.has(dedupDocId)) {
-            console.log(`[Dividend Notify Dedup In-Memory] ${dedupDocId} already processed. Skipping.`);
-            continue;
-          }
-          sentKeysInMemory.add(dedupDocId);
-
-          const logRef = ctx.adminDb.collection("dividend_notify_log").doc(dedupDocId);
-          const logSnap = await logRef.get();
-
-          if (logSnap.exists) {
-            console.log(`[Dividend Notify Dedup DB] ${dedupDocId} already notified. Skipping.`);
-            continue;
-          }
-
-          let effectiveShares = shares;
-          if (evt.type === 'payment' && evt.exDateStr) {
-            try {
-              const snapsRef = ctx.adminDb.collection("users").doc(userId).collection("snapshots");
-              const snapDocs = await snapsRef.where("date", "<=", evt.exDateStr).orderBy("date", "desc").limit(1).get();
-              if (!snapDocs.empty) {
-                const targetStock = snapDocs.docs[0].data().stocks?.find((s: any) => s.symbol && normalizeSymbol(s.symbol) === symbol);
-                if (targetStock && targetStock.shares !== undefined) {
-                  effectiveShares = Number(targetStock.shares);
-                }
-              }
-            } catch (snapErr) {
-              console.warn(`[Snapshot Lookup Warning] Failed to fetch exDate snapshot for ${symbol}:`, snapErr);
-            }
-          }
-
-          let msgText = "";
-          if (evt.type === 'ex-dividend') {
-            msgText = `📅 今天是 ${stockName}(${symbol}) 的除息日！每股 $${evt.amount}`;
-          } else {
-            const totalEst = Math.round(evt.amount * effectiveShares);
-            msgText = `💰 今天是 ${stockName}(${symbol}) 的領息日！預計入帳 $${totalEst.toLocaleString()}`;
-          }
-
-          console.log(`[Dividend Notify] Sending ${evt.type} notification for ${symbol} to ChatID ${chatId}`);
-          await sendTelegramMsg(botToken, chatId, msgText);
-          notificationsSent++;
-
-          await logRef.set({
-            userId,
-            chatId,
-            symbol,
-            type: evt.type,
-            date: todayStr,
-            sentAt: new Date().toISOString()
-          });
-          logsCreated++;
-        }
-      }
+      const userRef = ctx.adminDb.collection("users").doc(userId);
+      const stocksSnapshot = await userRef.collection("stocks").get();
+      await notifyHolder({
+        chatId,
+        botToken,
+        rawStocks: stocksSnapshot.docs.map((d: any) => d.data()),
+        snapshotsRef: userRef.collection("snapshots"),
+        logExtra: { userId },
+      });
     }
 
     // 2. Process telegram_chats collection (for standalone Telegram Bot chats)
@@ -116,72 +144,13 @@ export async function runDividendNotifyCore() {
       const rawStocks = chatData.stocks || [];
       if (!chatId || !botToken || !Array.isArray(rawStocks) || rawStocks.length === 0) continue;
 
-      const userStocks = dedupeStocksBySymbol(rawStocks);
-
-      for (const stock of userStocks) {
-        if (!stock) continue;
-        const symbol = normalizeSymbol(stock.symbol);
-        if (!symbol) continue;
-        const stockName = (stock.name && stock.name !== symbol) ? stock.name : symbol;
-        const shares = Number(stock.shares) || 0;
-        const info = stock.dividendInfo || stock;
-
-        const eventsToNotify = findDividendEventsForDate(info, stock, todayStr);
-
-        for (const evt of eventsToNotify) {
-          const dedupDocId = `notify_${chatId}_${symbol}_${evt.type}_${todayStr}`;
-          if (sentKeysInMemory.has(dedupDocId)) {
-            console.log(`[Dividend Notify Dedup In-Memory] ${dedupDocId} already processed. Skipping.`);
-            continue;
-          }
-          sentKeysInMemory.add(dedupDocId);
-
-          const logRef = ctx.adminDb.collection("dividend_notify_log").doc(dedupDocId);
-          const logSnap = await logRef.get();
-
-          if (logSnap.exists) {
-            console.log(`[Dividend Notify Dedup DB] ${dedupDocId} already notified. Skipping.`);
-            continue;
-          }
-
-          let effectiveShares = shares;
-          if (evt.type === 'payment' && evt.exDateStr) {
-            try {
-              const snapsRef = ctx.adminDb.collection("telegram_chats").doc(chatDoc.id).collection("snapshots");
-              const snapDocs = await snapsRef.where("date", "<=", evt.exDateStr).orderBy("date", "desc").limit(1).get();
-              if (!snapDocs.empty) {
-                const targetStock = snapDocs.docs[0].data().stocks?.find((s: any) => s.symbol && normalizeSymbol(s.symbol) === symbol);
-                if (targetStock && targetStock.shares !== undefined) {
-                  effectiveShares = Number(targetStock.shares);
-                }
-              }
-            } catch (snapErr) {
-              console.warn(`[Snapshot Lookup Warning] Failed to fetch exDate snapshot for ${symbol} in telegram_chats:`, snapErr);
-            }
-          }
-
-          let msgText = "";
-          if (evt.type === 'ex-dividend') {
-            msgText = `📅 今天是 ${stockName}(${symbol}) 的除息日！每股 $${evt.amount}`;
-          } else {
-            const totalEst = Math.round(evt.amount * effectiveShares);
-            msgText = `💰 今天是 ${stockName}(${symbol}) 的領息日！預計入帳 $${totalEst.toLocaleString()}`;
-          }
-
-          console.log(`[Dividend Notify] Sending ${evt.type} notification for ${symbol} to ChatID ${chatId}`);
-          await sendTelegramMsg(botToken, chatId, msgText);
-          notificationsSent++;
-
-          await logRef.set({
-            chatId,
-            symbol,
-            type: evt.type,
-            date: todayStr,
-            sentAt: new Date().toISOString()
-          });
-          logsCreated++;
-        }
-      }
+      await notifyHolder({
+        chatId,
+        botToken,
+        rawStocks,
+        snapshotsRef: ctx.adminDb.collection("telegram_chats").doc(chatDoc.id).collection("snapshots"),
+        logExtra: {},
+      });
     }
 
     console.log(`[Dividend Notify Complete] Date: ${todayStr}, Notifications Sent: ${notificationsSent}, Logs Created: ${logsCreated}`);

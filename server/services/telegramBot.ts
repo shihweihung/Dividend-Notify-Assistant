@@ -3,7 +3,6 @@ import { ctx, logFirestoreError } from "../context";
 import { fetchStockDataFromTwse } from "../../src/services/twseService";
 import { sendTelegramMsg } from "./telegramApi";
 import { getChatFromFirestore } from "./chatStore";
-import { generateDailyPostCore } from "./dailyPost";
 import { parsePortfolioScreenshotWithGemini } from "./screenshotParser";
 
 // Helper: Process Telegram Message (shared by Webhook and Polling)
@@ -224,17 +223,9 @@ export async function processTelegramMessage(botToken: string, msg: any) {
       `📊 *「我目前的資產現況與配置建議」*\n` +
       `💰 *「我現在有多少閒置現金？」*\n` +
       `📈 *「分析我的持股持倉」*\n` +
-      `✍️ *輸入 「/post」 或 「舒洪道」 即可手動要求生成舒洪道風格貼文！*\n` +
       `🎯 *「如何做好我的動態資產平衡？」*\n\n` +
       `直接在下方輸入區輸入您的問題，隨時看子彈到位、聽策略叮嚀！👇`;
     await sendTelegramMsg(botToken, chatId, welcomeText);
-    return;
-  }
-
-  // Manual Trigger Command for "舒洪道" Daily Post Draft
-  if (text.startsWith("/post") || text.includes("舒洪道") || text.includes("生成貼文") || text === "發文") {
-    await sendTelegramMsg(botToken, chatId, "✍️ 收到指示！正在為您生成「舒洪道」風格貼文草稿，請稍候...");
-    generateDailyPostCore().catch(err => console.error("[Manual Telegram Post Error]", err));
     return;
   }
 
