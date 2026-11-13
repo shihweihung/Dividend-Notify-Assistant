@@ -34,9 +34,6 @@ async function startServer() {
     res.json({ status: "ok" });
   });
 
-  // 每日貼文自動推播已暫停，僅保留手動觸發（Web UI / Telegram /post / Cloud Scheduler）
-  console.log("[Scheduler] Daily post automatic push is PAUSED per user preference (manual trigger only).");
-
   app.use(adminRouter);     // /api/admin/*
   app.use(telegramRouter);  // /api/telegram/*
 
@@ -45,7 +42,7 @@ async function startServer() {
 
   app.use(dividendRouter);  // /api/dividend/:symbol
   app.use(portfolioRouter); // /api/parse-portfolio-screenshot
-  app.use(cronRouter);      // /api/cron/*, /api/user/generate-daily-post
+  app.use(cronRouter);      // /api/cron/*
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {

@@ -8,7 +8,7 @@
 - `server/context.ts`:共用狀態(adminDb、firestoreAvailable、in-memory fallback)
 - `server/lib/`:純函式,不碰網路與資料庫,必須有測試
   - `symbols.ts`(NAME_MAP、resolveSymbolFromName)、`portfolioMerge.ts`(mergeAndValidateStocks)、`dividendEvents.ts`(股息事件判斷)
-- `server/services/`:商業流程(每日批次、股息通知、舒洪道貼文、Telegram bot、截圖解析)
+- `server/services/`:商業流程(每日批次、股息通知、Telegram bot、截圖解析)
 - `server/routes/`:Express router,只做參數檢查與呼叫 service
 - 新增 API 時放進對應的 routes 檔,不要再寫回 server.ts
 - `npm test` 必須全部通過;改到 `server/lib/` 的邏輯要同步補 `tests/core.spec.ts`
@@ -54,15 +54,13 @@
 - 金額 = 股數 × 每股股利,元以下捨去,再扣匯費 10 元;不扣二代健保(使用者決定)
 - 相關邏輯放在 `server/lib/dividendEvents.ts`,測試在 `tests/core.spec.ts`、`tests/dividendNotify.spec.ts`
 
-### 8. 舒洪道貼文:手動只發給本人
-網頁按鈕與 Telegram `/post` 一律帶 `onlyUserId` / `onlyChatId` 呼叫 `generateDailyPostCore`,
-不可發給其他使用者(使用者是家人,不需要收到貼文草稿)。
-排程 `/api/cron/daily-post` 才會掃全部使用者,並受試用期 `DAILY_POST_TRIAL_END` 與週末限制。
-
 ## 使用情境(做取捨時的依據)
 - 使用者只有本人與少數家人,不需要為大量使用者設計
 - 優先順序:股息股數正確 > 花費最低 > 使用方便 > 效能
-- daily-batch 排程約在台北時間下午 4 點(收盤後),快照代表當天收盤後的持股
+- daily-batch 排程在台北時間收盤後(約下午 2～4 點)執行,快照代表當天收盤後的持股
+
+## 已移除的功能
+- 舒洪道每日貼文草稿(2026-11 移除,使用者不再使用),不要再加回來
 
 ## 其他慣例
 - Gemini 一律用 Flash / Flash-Lite,Pro 會產生明顯 API 費用
