@@ -3,7 +3,7 @@ import { normalizeSymbol } from "./symbols";
 
 // 原本在 runDividendNotifyCore 內，users 與 telegram_chats 兩段各複製一份；抽出後邏輯完全相同
 
-export type DividendEvent = { type: 'ex-dividend' | 'payment'; amount: number; exDateStr?: string };
+export type DividendEvent = { type: 'ex-dividend' | 'payment'; amount: number; exDateStr?: string; payDateEstimated?: boolean };
 
 export function normalizeDateStr(d: any): string {
   if (!d || typeof d !== 'string') return '';
@@ -63,11 +63,13 @@ export function findDividendEventsForDate(info: any, stock: any, todayStr: strin
     for (const div of info.history) {
       const exDateStr = normalizeDateStr(div.date);
       let payDateStr = normalizeDateStr(div.paymentDate || div.payDate);
+      let payDateEstimated = false;
 
       if (!payDateStr && exDateStr) {
         const mEx = moment(exDateStr);
         if (mEx.isValid()) {
           payDateStr = mEx.add(1, 'month').format('YYYY-MM-DD');
+          payDateEstimated = true;
         }
       }
 
@@ -85,7 +87,8 @@ export function findDividendEventsForDate(info: any, stock: any, todayStr: strin
         eventsToNotify.push({
           type: 'payment',
           amount: Number(div.amount || info.amount || 0),
-          exDateStr
+          exDateStr,
+          ...(payDateEstimated ? { payDateEstimated: true } : {})
         });
       }
     }
@@ -109,4 +112,84 @@ export function findDividendEventsForDate(info: any, stock: any, todayStr: strin
     }
   }
   return eventsToNotify;
+}
+
+// ---------------------------------------------------------------------------
+// 領息金額計算
+// ---------------------------------------------------------------------------
+
+export type HoldingSnapshot = { date: string; stocks?: any[] };
+
+// 每筆現金股利的匯費（使用者設定：只扣匯費，不扣二代健保）
+export const REMITTANCE_FEE = 10;
+
+/**
+ * 除息日「前一天（含更早）」最後一份快照裡的股數。
+ * 除息日當天才買的股票領不到這次股息，所以不能用除息日當天的快照。
+ * - 回傳 null：找不到除息日前的快照（無法判斷，呼叫端需註明是估算）
+ * - 回傳 0：當時沒有持有這檔
+ */
+export function sharesBeforeExDate(snapshots: HoldingSnapshot[], symbol: string, exDateStr: string): number | null {
+  const target = normalizeDateStr(exDateStr);
+  if (!target) return null;
+  let best: HoldingSnapshot | null = null;
+  let bestDate = '';
+  for (const snap of snapshots) {
+    const d = normalizeDateStr(snap?.date);
+    if (d && d < target && d > bestDate) {
+      best = snap;
+      bestDate = d;
+    }
+  }
+  if (!best) return null;
+  const hit = dedupeStocksBySymbol(best.stocks || []).find((s) => s.symbol === normalizeSymbol(symbol));
+  return hit ? (Number(hit.shares) || 0) : 0;
+}
+
+/**
+ * 要檢查股息事件的股票清單：目前持股 + 近期快照中出現過、但已經賣掉的股票。
+ * 除息後才賣掉的股票股息照樣入帳，所以也要通知。
+ * 同一檔以「目前持股」的資料為準，其次是最新的快照。
+ */
+export function collectDividendCandidates(currentStocks: any[], snapshots: HoldingSnapshot[]): { stock: any; holdsNow: boolean }[] {
+  const result: { stock: any; holdsNow: boolean }[] = [];
+  const seen = new Set<string>();
+  for (const stock of dedupeStocksBySymbol(currentStocks || [])) {
+    seen.add(stock.symbol);
+    result.push({ stock, holdsNow: true });
+  }
+  const newestFirst = [...(snapshots || [])].sort((a, b) =>
+    normalizeDateStr(b?.date).localeCompare(normalizeDateStr(a?.date)));
+  for (const snap of newestFirst) {
+    for (const stock of dedupeStocksBySymbol(snap?.stocks || [])) {
+      if (seen.has(stock.symbol)) continue;
+      seen.add(stock.symbol);
+      result.push({ stock, holdsNow: false });
+    }
+  }
+  return result;
+}
+
+/** 預計入帳金額：股數 × 每股股利，元以下捨去，再扣匯費（不會小於 0） */
+export function estimateNetPayment(amountPerShare: number, shares: number): number {
+  const gross = Math.floor(amountPerShare * shares + 1e-6);
+  return Math.max(gross - REMITTANCE_FEE, 0);
+}
+
+export function buildPaymentMessage(opts: {
+  stockName: string;
+  symbol: string;
+  amountPerShare: number;
+  shares: number;
+  sharesFromCurrentHoldings: boolean;
+  payDateEstimated?: boolean;
+}): string {
+  const net = estimateNetPayment(opts.amountPerShare, opts.shares);
+  const lines = [
+    `💰 今天是 ${opts.stockName}(${opts.symbol}) 的領息日！預計入帳 $${net.toLocaleString()}`,
+    `（${opts.shares.toLocaleString()} 股 × 每股 $${opts.amountPerShare}，已扣匯費 $${REMITTANCE_FEE}）`,
+  ];
+  if (opts.sharesFromCurrentHoldings) lines.push('⚠️ 找不到除息日前的持股紀錄，以目前持股估算');
+  if (opts.payDateEstimated) lines.push('⚠️ 發放日尚未公布，以除息日後一個月推估');
+  return lines.join('\n');
 }

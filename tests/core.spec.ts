@@ -4,7 +4,10 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveSymbolFromName, normalizeName, normalizeSymbol } from '../server/lib/symbols';
 import { mergeAndValidateStocks } from '../server/lib/portfolioMerge';
-import { normalizeDateStr, dedupeStocksBySymbol, findDividendEventsForDate } from '../server/lib/dividendEvents';
+import {
+  normalizeDateStr, dedupeStocksBySymbol, findDividendEventsForDate,
+  sharesBeforeExDate, collectDividendCandidates, estimateNetPayment, buildPaymentMessage,
+} from '../server/lib/dividendEvents';
 
 describe('resolveSymbolFromName（規則 4：股名對照表優先於 Gemini 代號）', () => {
   test('股名查得到時，以對照表為準，忽略 Gemini 給的代號', () => {
@@ -163,7 +166,7 @@ describe('股息通知：資料整理與事件判斷', () => {
   test('沒有發放日時，以除息日 +1 個月推估', () => {
     const info = { history: [{ date: '2026-10-12', amount: 0.8 }] };
     const ev = findDividendEventsForDate(info, {}, '2026-11-12');
-    assert.deepEqual(ev, [{ type: 'payment', amount: 0.8, exDateStr: '2026-10-12' }]);
+    assert.deepEqual(ev, [{ type: 'payment', amount: 0.8, exDateStr: '2026-10-12', payDateEstimated: true }]);
   });
 
   test('發放日是今天 → payment 事件，並帶出對應除息日（用來查除息當天的持股快照）', () => {
@@ -183,5 +186,65 @@ describe('股息通知：資料整理與事件判斷', () => {
       { type: 'ex-dividend', amount: 3, exDateStr: '2026-11-12' },
     ]);
     assert.equal(findDividendEventsForDate(info, {}, '2026-11-13').length, 0);
+  });
+});
+
+describe('領息金額：用除息日前的持股計算（持股變動不影響）', () => {
+  const snaps = [
+    { date: '2026-09-16', stocks: [{ symbol: '2317', shares: 2000 }] },
+    { date: '2026-09-17', stocks: [{ symbol: '2317', shares: 3050 }, { symbol: '0056', shares: 1000 }] },
+    { date: '2026-09-18', stocks: [{ symbol: '2317', shares: 5000 }] }, // 除息日當天加碼，不能領
+    { date: '2026-10-01', stocks: [] },                                   // 之後全部賣掉
+  ];
+
+  test('取除息日「前一天」的快照，不含除息日當天', () => {
+    assert.equal(sharesBeforeExDate(snaps, '2317', '2026-09-18'), 3050);
+  });
+
+  test('除息日前沒有快照時回傳 null（呼叫端要標示估算）', () => {
+    assert.equal(sharesBeforeExDate(snaps, '2317', '2026-09-16'), null);
+  });
+
+  test('除息日前的快照裡沒有這檔 → 0 股（當時沒持有，不能領）', () => {
+    assert.equal(sharesBeforeExDate(snaps, '2330', '2026-09-18'), 0);
+  });
+
+  test('快照日期格式不一、代號帶 .TW 也能對到', () => {
+    const s = [{ date: '2026/9/17', stocks: [{ symbol: '2317.TW', shares: 1000 }, { symbol: '2317', shares: 50 }] }];
+    assert.equal(sharesBeforeExDate(s, '2317', '2026-09-18'), 1050);
+  });
+
+  test('已經賣掉的股票仍會列入檢查（除息後才賣，股息照樣入帳）', () => {
+    const current = [{ symbol: '2330', shares: 100, dividendInfo: { amount: 5 } }];
+    const c = collectDividendCandidates(current, snaps);
+    assert.deepEqual(c.map(x => [x.stock.symbol, x.holdsNow]), [['2330', true], ['2317', false], ['0056', false]]);
+  });
+
+  test('同一檔以目前持股的資料為準，已賣出的則取最新快照', () => {
+    const c = collectDividendCandidates([{ symbol: '2317', shares: 1, name: '現在' }], [
+      { date: '2026-01-01', stocks: [{ symbol: '0056', shares: 1, name: '舊' }] },
+      { date: '2026-02-01', stocks: [{ symbol: '0056', shares: 2, name: '新' }, { symbol: '2317', shares: 9, name: '快照' }] },
+    ]);
+    assert.equal(c.find(x => x.stock.symbol === '2317')!.stock.name, '現在');
+    assert.equal(c.find(x => x.stock.symbol === '0056')!.stock.name, '新');
+  });
+
+  test('入帳金額：元以下捨去，再扣匯費 10 元，不扣二代健保', () => {
+    assert.equal(estimateNetPayment(1.2, 3050), 3650);      // 3660 - 10
+    assert.equal(estimateNetPayment(0.35, 333), 106);       // 116.55 → 116 - 10
+    assert.equal(estimateNetPayment(5, 10000), 49990);      // 滿 2 萬也不扣二代健保
+    assert.equal(estimateNetPayment(0.1, 30), 0);           // 不會變負數
+    assert.equal(estimateNetPayment(0.1, 3000), 290);       // 浮點誤差不可少算 1 元
+  });
+
+  test('領息訊息顯示股數與單價，方便對帳', () => {
+    const msg = buildPaymentMessage({ stockName: '鴻海', symbol: '2317', amountPerShare: 1.2, shares: 3050, sharesFromCurrentHoldings: false });
+    assert.equal(msg, '💰 今天是 鴻海(2317) 的領息日！預計入帳 $3,650\n（3,050 股 × 每股 $1.2，已扣匯費 $10）');
+  });
+
+  test('用目前持股估算、發放日推估時，訊息要註明', () => {
+    const msg = buildPaymentMessage({ stockName: '鴻海', symbol: '2317', amountPerShare: 1, shares: 1000, sharesFromCurrentHoldings: true, payDateEstimated: true });
+    assert.match(msg, /以目前持股估算/);
+    assert.match(msg, /以除息日後一個月推估/);
   });
 });

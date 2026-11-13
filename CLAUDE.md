@@ -46,6 +46,24 @@
 ### 6. 持股截圖含帳號與姓名
 原圖不可寫入 Cloud Storage、不可進 log、不可存進 Firestore,只保留解析後的結果。
 
+### 7. 領息金額以「除息日前一天」的持股計算
+使用者會隨時調整持股,領息通知不可直接用目前股數。
+- 股數取除息日前(不含當天)最後一份快照(`sharesBeforeExDate`);除息日當天才買的領不到
+- 除息後才賣掉的股票仍要發領息通知(`collectDividendCandidates` 會從快照找回來)
+- 找不到除息前快照時才用目前股數,且訊息必須註明「以目前持股估算」
+- 金額 = 股數 × 每股股利,元以下捨去,再扣匯費 10 元;不扣二代健保(使用者決定)
+- 相關邏輯放在 `server/lib/dividendEvents.ts`,測試在 `tests/core.spec.ts`、`tests/dividendNotify.spec.ts`
+
+### 8. 舒洪道貼文:手動只發給本人
+網頁按鈕與 Telegram `/post` 一律帶 `onlyUserId` / `onlyChatId` 呼叫 `generateDailyPostCore`,
+不可發給其他使用者(使用者是家人,不需要收到貼文草稿)。
+排程 `/api/cron/daily-post` 才會掃全部使用者,並受試用期 `DAILY_POST_TRIAL_END` 與週末限制。
+
+## 使用情境(做取捨時的依據)
+- 使用者只有本人與少數家人,不需要為大量使用者設計
+- 優先順序:股息股數正確 > 花費最低 > 使用方便 > 效能
+- daily-batch 排程約在台北時間下午 4 點(收盤後),快照代表當天收盤後的持股
+
 ## 其他慣例
 - Gemini 一律用 Flash / Flash-Lite,Pro 會產生明顯 API 費用
 - Cloud Run `min instances` 維持 0

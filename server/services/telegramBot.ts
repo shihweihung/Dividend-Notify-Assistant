@@ -234,7 +234,18 @@ export async function processTelegramMessage(botToken: string, msg: any) {
   // Manual Trigger Command for "舒洪道" Daily Post Draft
   if (text.startsWith("/post") || text.includes("舒洪道") || text.includes("生成貼文") || text === "發文") {
     await sendTelegramMsg(botToken, chatId, "✍️ 收到指示！正在為您生成「舒洪道」風格貼文草稿，請稍候...");
-    generateDailyPostCore().catch(err => console.error("[Manual Telegram Post Error]", err));
+    // 只產生並發送給提出要求的這個聊天室
+    generateDailyPostCore({ onlyChatId: String(chatId).trim() })
+      .then(async (result: any) => {
+        if (result?.postsGenerated > 0) return;
+        const reason = !result?.success
+          ? "系統暫時無法讀取資料"
+          : !result?.targetFound
+            ? "找不到您的持股設定"
+            : "目前沒有持股資料，或 AI 暫時無法產生";
+        await sendTelegramMsg(botToken, chatId, `⚠️ 這次沒有產生貼文草稿（${reason}），請稍後再試。`);
+      })
+      .catch(err => console.error("[Manual Telegram Post Error]", err));
     return;
   }
 

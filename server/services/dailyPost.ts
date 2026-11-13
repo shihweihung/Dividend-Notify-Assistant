@@ -6,21 +6,27 @@ import { sendTelegramMsg } from "./telegramApi";
 // Core Function: Generate Daily "舒洪道" Style Post Draft via Gemini & Telegram Push
 export const DAILY_POST_TRIAL_END = "2026-08-11";
 
-export async function generateDailyPostCore() {
-  console.log("[Daily Post] Starting daily post draft generation...");
+/**
+ * 產生舒洪道貼文草稿並推到 Telegram。
+ * - 不帶參數：排程用，發給所有使用者，受試用期與週末限制。
+ * - 帶 onlyUserId / onlyChatId：使用者手動要求，只發給本人，不受試用期與週末限制。
+ */
+export async function generateDailyPostCore(target?: { onlyUserId?: string; onlyChatId?: string }) {
+  const isManual = Boolean(target?.onlyUserId || target?.onlyChatId);
+  console.log(`[Daily Post] Starting daily post draft generation (${isManual ? "manual" : "scheduled"})...`);
 
   const taipeiTime = moment().tz("Asia/Taipei");
   const todayStr = taipeiTime.format("YYYY-MM-DD");
 
-  // 1. Trial Period Expiry Check
-  if (todayStr > DAILY_POST_TRIAL_END) {
+  // 1. Trial Period Expiry Check（只限制排程推播）
+  if (!isManual && todayStr > DAILY_POST_TRIAL_END) {
     console.log("[Daily Post] Trial period ended, skipping.");
     return { success: true, skipped: true, reason: "Trial period ended" };
   }
 
   // 2. Weekday Check (0 is Sunday, 6 is Saturday)
   const dayOfWeek = taipeiTime.day();
-  if (dayOfWeek === 0 || dayOfWeek === 6) {
+  if (!isManual && (dayOfWeek === 0 || dayOfWeek === 6)) {
     console.log(`[Daily Post] Weekend (${todayStr}, day ${dayOfWeek}), skipping.`);
     return { success: true, skipped: true, reason: "Weekend" };
   }
@@ -33,7 +39,7 @@ export async function generateDailyPostCore() {
   let postsGenerated = 0;
   const processedChatIds = new Set<string>();
 
-  const processAndSendDraftForUser = async (userStocks: any[], chatId: string, botToken: string) => {
+  const processAndSendDraftForUser = async (userStocks: any[], chatId: string, botToken: string): Promise<boolean> => {
     const processed = userStocks.map((s: any) => {
       const currentPrice = Number(s.dividendInfo?.currentPrice || s.currentPrice || 0);
       const shares = Number(s.shares) || 0;
@@ -66,7 +72,7 @@ export async function generateDailyPostCore() {
     processed.sort((a, b) => b._marketValue - a._marketValue);
 
     const top10 = processed.slice(0, 10).map(({ _marketValue, ...item }) => item);
-    if (top10.length === 0) return;
+    if (top10.length === 0) return false;
 
     const top10Json = JSON.stringify(top10, null, 2);
 
@@ -107,7 +113,7 @@ ${top10Json}
     const apiKey = process.env.CUSTOM_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
     if (!apiKey) {
       console.warn("[Daily Post] GEMINI_API_KEY missing, skipping Gemini call.");
-      return;
+      return false;
     }
 
     try {
@@ -158,52 +164,63 @@ ${top10Json}
         const fullMsg = `📝 今日貼文草稿(舒洪道)：\n\n${generatedText}`;
         await sendTelegramMsg(botToken, chatId, fullMsg);
         console.log(`[Daily Post] Successfully sent daily post draft to ChatID ${chatId}`);
+        return true;
       } else {
         console.error(`[Daily Post Error] All Flash model candidates failed for ChatID ${chatId}`);
       }
     } catch (genErr: any) {
       console.error(`[Daily Post Gemini Error] ChatID ${chatId}:`, genErr.message || genErr);
     }
+    return false;
   };
+
+  let postsFailed = 0;
+  let targetFound = false;
 
   try {
     // 1. Process authenticated users collection
     const usersSnapshot = await ctx.adminDb.collection("users").get();
     for (const userDoc of usersSnapshot.docs) {
       const userId = userDoc.id;
+      if (target?.onlyUserId && userId !== target.onlyUserId) continue;
       const userData = userDoc.data() || {};
       const chatId = userData.telegramChatId ? String(userData.telegramChatId) : null;
       const botToken = userData.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN || "";
 
       if (!chatId || !botToken) continue;
+      if (target?.onlyChatId && chatId.trim() !== target.onlyChatId) continue;
       processedChatIds.add(chatId);
+      targetFound = true;
 
       const stocksSnapshot = await ctx.adminDb.collection("users").doc(userId).collection("stocks").get();
       const userStocks = stocksSnapshot.docs.map((d: any) => d.data());
 
       if (!userStocks || userStocks.length === 0) continue;
 
-      await processAndSendDraftForUser(userStocks, chatId, botToken);
-      postsGenerated++;
+      if (await processAndSendDraftForUser(userStocks, chatId, botToken)) postsGenerated++;
+      else postsFailed++;
     }
 
     // 2. Process telegram_chats collection (for standalone Telegram Bot chats)
-    const chatsSnapshot = await ctx.adminDb.collection("telegram_chats").get();
+    // 網頁登入的使用者只看自己的 users 文件，不用掃 telegram_chats
+    const chatsSnapshot = target?.onlyUserId ? { docs: [] as any[] } : await ctx.adminDb.collection("telegram_chats").get();
     for (const chatDoc of chatsSnapshot.docs) {
       const chatData = chatDoc.data() || {};
       const chatId = String(chatData.chatId || chatDoc.id);
       if (processedChatIds.has(chatId)) continue;
+      if (target?.onlyChatId && chatId.trim() !== target.onlyChatId) continue;
+      targetFound = true;
       const botToken = chatData.botToken || process.env.TELEGRAM_BOT_TOKEN || "";
       const userStocks = chatData.stocks || [];
 
       if (!chatId || !botToken || !Array.isArray(userStocks) || userStocks.length === 0) continue;
 
-      await processAndSendDraftForUser(userStocks, chatId, botToken);
-      postsGenerated++;
+      if (await processAndSendDraftForUser(userStocks, chatId, botToken)) postsGenerated++;
+      else postsFailed++;
     }
 
     console.log(`[Daily Post Complete] Date: ${todayStr}, Posts Drafts Generated: ${postsGenerated}`);
-    return { success: true, date: todayStr, postsGenerated };
+    return { success: true, date: todayStr, postsGenerated, postsFailed, targetFound };
   } catch (err: any) {
     console.error("[Daily Post Error]:", err.message || err);
     return { success: false, error: err.message || err };

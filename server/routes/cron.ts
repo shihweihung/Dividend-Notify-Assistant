@@ -36,7 +36,8 @@ router.post("/api/cron/daily-post", apiKeyAuth, async (req, res) => {
 // API: User Manual Trigger for "舒洪道" Daily Post Draft Generation
 router.post("/api/user/generate-daily-post", firebaseAuth, async (req, res) => {
   console.log("[API] User requested manual generation of 舒洪道 post draft.");
-  const result = await generateDailyPostCore();
+  // 只發給目前登入的使用者本人
+  const result = await generateDailyPostCore({ onlyUserId: (req as any).user.uid });
   if (result && !result.success) {
     return res.status(500).json(result);
   }
