@@ -60,6 +60,16 @@
   `receivedAmountCurrentYear`、`monthlyDistribution` 等欄位(那是抓資料當下的結果,過了發放日不會更新)
 - 測試在 `tests/dividendCalc.spec.ts`、`tests/core.spec.ts`、`tests/dividendNotify.spec.ts`
 
+### 8. 買進 / 賣出以交易紀錄為準
+- 交易存在 `users/{uid}/stocks/{symbol}.trades` 陣列(不另開集合,不多讀文件),規則在 `shared/trades.ts`
+- 除息日能領幾股看「成交日」,不是記錄日:除息日前一天(含)以前買進才領得到,除息日當天賣出仍領得到;
+  快照只包含「記錄日 <= 快照日」的交易,`adjustSharesWithTrades` 依成交日修正,所以晚幾天補登也算得對
+- 手續費與證交稅自動估算(使用者決定,不手動輸入):手續費 0.1425%(整股最低 20、零股最低 1),
+  證交稅 股票 0.3% / ETF 0.1% / 債券 ETF 免徵
+- 賣出不改變平均成本;買進的平均成本含手續費重新加權
+- 只能復原「最後一筆」交易(用交易前存下的 prevShares / prevCost 還原),避免成本算錯
+- 舊的清倉資料(sellPrice / soldShares)沒有交易紀錄時才使用;沒填賣出股數就不算已實現損益,不可預設 1000 股
+
 ## 使用情境(做取捨時的依據)
 - 使用者只有本人與少數家人,不需要為大量使用者設計
 - 優先順序:股息股數正確 > 花費最低 > 使用方便 > 效能

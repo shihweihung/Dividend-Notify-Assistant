@@ -34,6 +34,8 @@ import {
 } from 'lucide-react';
 import { AIScreenshotModal } from './components/AIScreenshotModal';
 import { PortfolioTrendChart } from './components/PortfolioTrendChart';
+import { TradeModal } from './components/TradeModal';
+import { applyTrade, undoLastTrade, sortTrades, totalRealizedPnl, type Trade, type TradeSide } from '../shared/trades';
 import { 
   PieChart as RechartsPieChart, 
   Pie, 
@@ -189,6 +191,7 @@ function MainApp() {
 
   const [snapshots, setSnapshots] = useState<{ date: string; stocks?: any[]; cash?: number; totalValue?: number }[]>([]);
   const [stockToDelete, setStockToDelete] = useState<{ symbol: string; name: string } | null>(null);
+  const [tradeModal, setTradeModal] = useState<{ symbol: string; side: TradeSide } | null>(null);
   const [stockFilterTab, setStockFilterTab] = useState<'active' | 'sold'>('active');
   const [stockGrouping, setStockGrouping] = useState<'none' | 'type' | 'frequency'>('none');
   const [collapsedStockCards, setCollapsedStockCards] = useState<Set<string>>(new Set());
@@ -347,8 +350,9 @@ function MainApp() {
   // 除息日前一天的持股（與 Telegram 通知共用 shared/dividendCalc.ts 的規則）
   const getSharesOnExDate = useCallback((symbol: string, exDateStr: string, currentShares: number): number => {
     if (!exDateStr) return currentShares;
-    return resolveSharesAtExDate(snapshots, symbol, exDateStr, currentShares).shares;
-  }, [snapshots]);
+    const trades = stocks.find(s => normalizeSymbol(s.symbol) === normalizeSymbol(symbol))?.trades || [];
+    return resolveSharesAtExDate(snapshots, symbol, exDateStr, currentShares, trades).shares;
+  }, [snapshots, stocks]);
 
   // Notification Helpers (【備註】已由後端 Telegram 推播取代，此為輔助功能)
   const requestNotificationPermission = async () => {
@@ -987,6 +991,47 @@ function MainApp() {
     }
   };
 
+  // 記錄一筆買進 / 賣出：更新股數與平均成本，並把交易存進該股票的 trades 陣列
+  const handleRecordTrade = async (symbol: string, input: { side: TradeSide; shares: number; price: number; tradeDate: string }) => {
+    const cleanSym = normalizeSymbol(symbol);
+    const currentStock = stocks.find(s => normalizeSymbol(s.symbol) === cleanSym);
+    if (!currentStock) throw new Error('找不到這檔股票');
+    const now = new Date();
+    const { position, trade } = applyTrade(cleanSym, { shares: currentStock.shares, cost: currentStock.cost ?? null }, {
+      ...input,
+      id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+      recordedAt: now.toISOString(),
+      recordedDate: format(now, 'yyyy-MM-dd'),
+    });
+    const trades = [...(currentStock.trades || []), trade];
+    const updateObj = { shares: position.shares, cost: position.cost, trades };
+    if (user) {
+      const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
+      await setDoc(stockRef, updateObj, { merge: true });
+    }
+    setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, ...updateObj, cost: position.cost ?? undefined, symbol: cleanSym } : s));
+  };
+
+  // 復原最後一筆交易（回到交易前的股數與成本）
+  const handleUndoLastTrade = async (symbol: string) => {
+    const cleanSym = normalizeSymbol(symbol);
+    const currentStock = stocks.find(s => normalizeSymbol(s.symbol) === cleanSym);
+    const undone = currentStock ? undoLastTrade(currentStock.trades || []) : null;
+    if (!undone) return;
+    if (!window.confirm('確定要復原最後一筆交易嗎？股數與成本會回到交易前。')) return;
+    const updateObj = { shares: undone.position.shares, cost: undone.position.cost, trades: undone.trades };
+    if (user) {
+      const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
+      try {
+        await setDoc(stockRef, updateObj, { merge: true });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${cleanSym}`);
+        return;
+      }
+    }
+    setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, ...updateObj, cost: undone.position.cost ?? undefined, symbol: cleanSym } : s));
+  };
+
   const handleUpdateCost = async (symbol: string, cost: number) => {
     const cleanSym = normalizeSymbol(symbol);
     setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, cost, symbol: cleanSym } : s));
@@ -1547,11 +1592,21 @@ function MainApp() {
           totalCost += stock.cost * shares;
           totalMarketValueOfCostedStocks += marketValue;
         }
-      } else {
+      }
+      if (stock.trades && stock.trades.length > 0) {
+        // 有交易紀錄：已實現損益以每筆賣出為準（部分賣出也算）
+        for (const t of stock.trades) {
+          if (t.side === 'sell' && t.realizedPnl !== null && t.prevCost !== null) {
+            totalRealizedProfit += t.realizedPnl;
+            totalSoldCost += t.prevCost * t.shares;
+          }
+        }
+      } else if (shares <= 0) {
+        // 舊資料：清倉時手動填的賣出價與股數（沒填股數就不算，避免亂猜）
         const cost = stock.cost || 0;
         const sellPrice = stock.sellPrice || 0;
-        const soldShares = stock.soldShares || 1000;
-        if (cost > 0 && sellPrice > 0) {
+        const soldShares = stock.soldShares || 0;
+        if (cost > 0 && sellPrice > 0 && soldShares > 0) {
           const profit = (sellPrice - cost) * soldShares;
           totalRealizedProfit += profit;
           totalSoldCost += cost * soldShares;
@@ -3094,10 +3149,15 @@ function MainApp() {
                                   const costVal = (stock.cost || 0) * stock.shares;
                                   const unrealizedPnl = marketVal - costVal;
 
-                                  const soldShares = stock.soldShares || 1000;
+                                  const hasTrades = !!(stock.trades && stock.trades.length > 0);
+                                  const soldShares = hasTrades
+                                    ? stock.trades!.filter(t => t.side === 'sell').reduce((a, t) => a + t.shares, 0)
+                                    : (stock.soldShares || 0);
                                   const sellPrice = stock.sellPrice || 0;
                                   const cost = stock.cost || 0;
-                                  const realizedPnl = (sellPrice - cost) * soldShares;
+                                  const realizedPnl = hasTrades
+                                    ? totalRealizedPnl(stock.trades!)
+                                    : (soldShares > 0 ? (sellPrice - cost) * soldShares : 0);
 
                                   return (
                                     <motion.div 
@@ -3369,6 +3429,63 @@ function MainApp() {
                                             )}
                                           </AnimatePresence>
 
+                                          {/* 0. 買進 / 賣出 與交易紀錄 */}
+                                          <div className="space-y-2">
+                                            <div className="grid grid-cols-2 gap-2">
+                                              <button
+                                                onClick={() => setTradeModal({ symbol: stock.symbol, side: 'buy' })}
+                                                className="h-11 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-sm font-black"
+                                              >
+                                                買進
+                                              </button>
+                                              <button
+                                                onClick={() => setTradeModal({ symbol: stock.symbol, side: 'sell' })}
+                                                disabled={stock.shares <= 0}
+                                                className="h-11 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-black disabled:opacity-30"
+                                              >
+                                                賣出
+                                              </button>
+                                            </div>
+                                            {stock.trades && stock.trades.length > 0 && (
+                                              <div className={cn(
+                                                "rounded-2xl p-3 text-xs space-y-2",
+                                                darkMode ? "bg-slate-800/60" : "bg-slate-50"
+                                              )}>
+                                                <div className="flex items-center justify-between">
+                                                  <span className="font-bold text-slate-400">交易紀錄</span>
+                                                  {stock.trades.some(t => t.side === 'sell') && (
+                                                    <span className="font-bold">
+                                                      已實現損益{' '}
+                                                      <span className={totalRealizedPnl(stock.trades) >= 0 ? "text-rose-500" : "text-emerald-500"}>
+                                                        {totalRealizedPnl(stock.trades) >= 0 ? '+' : '-'}${Math.abs(totalRealizedPnl(stock.trades)).toLocaleString()}
+                                                      </span>
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                {sortTrades(stock.trades).slice().reverse().slice(0, 5).map((t: Trade) => (
+                                                  <div key={t.id} className="flex items-center justify-between gap-2">
+                                                    <span className="text-slate-400 shrink-0">{t.tradeDate.slice(5).replace('-', '/')}</span>
+                                                    <span className={cn("font-black shrink-0", t.side === 'buy' ? "text-rose-500" : "text-emerald-600")}>
+                                                      {t.side === 'buy' ? '買' : '賣'}
+                                                    </span>
+                                                    <span className="flex-1 text-right font-bold">{t.shares.toLocaleString()} 股 @ ${t.price}</span>
+                                                    {t.side === 'sell' && t.realizedPnl !== null && (
+                                                      <span className={cn("w-20 text-right font-bold", t.realizedPnl >= 0 ? "text-rose-500" : "text-emerald-500")}>
+                                                        {t.realizedPnl >= 0 ? '+' : '-'}${Math.abs(t.realizedPnl).toLocaleString()}
+                                                      </span>
+                                                    )}
+                                                  </div>
+                                                ))}
+                                                <button
+                                                  onClick={() => handleUndoLastTrade(stock.symbol)}
+                                                  className="w-full h-10 mt-1 rounded-lg text-xs font-bold text-slate-400 border border-dashed border-slate-400/40"
+                                                >
+                                                  復原最後一筆交易
+                                                </button>
+                                              </div>
+                                            )}
+                                          </div>
+
                                           {/* 1. 持股/清倉與成本/賣價輸入 (User Inputs) */}
                                           <div className={cn(
                                             "grid gap-2 p-2.5 sm:p-3 rounded-2xl transition-colors",
@@ -3383,7 +3500,7 @@ function MainApp() {
                                                 type="number"
                                                 step="any"
                                                 key={`shares-${stock.symbol}-${stock.shares}-${stock.soldShares ?? ''}`}
-                                                defaultValue={stock.shares === 0 ? (stock.soldShares ?? 1000) : (stock.shares || '')}
+                                                defaultValue={stock.shares === 0 ? (stock.soldShares ?? '') : (stock.shares || '')}
                                                 onFocus={(e) => e.target.select()}
                                                 onBlur={(e) => {
                                                   const val = e.target.value === '' ? 0 : Number(e.target.value);
@@ -3791,6 +3908,27 @@ function MainApp() {
 
         {/* Clear / Delete Stock Confirmation Modal */}
         <AnimatePresence>
+          {tradeModal && (() => {
+            const target = stocks.find(s => normalizeSymbol(s.symbol) === normalizeSymbol(tradeModal.symbol));
+            if (!target) return null;
+            return (
+              <TradeModal
+                open
+                side={tradeModal.side}
+                darkMode={darkMode}
+                stock={{
+                  symbol: normalizeSymbol(target.symbol),
+                  name: target.name,
+                  shares: target.shares,
+                  cost: target.cost ?? null,
+                  currentPrice: target.dividendInfo?.currentPrice || (target as any).currentPrice,
+                }}
+                onClose={() => setTradeModal(null)}
+                onSubmit={(input) => handleRecordTrade(target.symbol, input)}
+              />
+            );
+          })()}
+
           {stockToDelete && (
             <div 
               className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"

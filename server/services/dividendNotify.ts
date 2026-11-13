@@ -65,7 +65,7 @@ export async function runDividendNotifyCore() {
         } else {
           // 已賣光的股票目前持股算 0；能領幾股以除息日前一天的快照為準（規則與網頁共用）
           const { shares, source } = resolveSharesAtExDate(
-            snapshots, symbol, evt.exDateStr || todayStr, holdsNow ? (Number(stock.shares) || 0) : 0);
+            snapshots, symbol, evt.exDateStr || todayStr, holdsNow ? (Number(stock.shares) || 0) : 0, stock.trades || []);
           if (shares <= 0) {
             console.log(`[Dividend Notify] ${symbol} not held before ex-date ${evt.exDateStr} for ChatID ${chatId}, no payment notice.`);
             continue;

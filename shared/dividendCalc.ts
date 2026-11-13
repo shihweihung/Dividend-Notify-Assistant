@@ -1,6 +1,7 @@
 // 前端（網頁）與後端（Telegram 通知）共用的股息計算。
 // 這裡只放純函式，不可引用 Firebase、Express、React 或任何會碰網路的套件，
 // 以確保網頁上看到的金額與 Telegram 通知的金額永遠用同一套規則算出來。
+import { adjustSharesWithTrades, sharesAtExDateFromCurrent, type Trade } from './trades';
 
 // ---------------------------------------------------------------------------
 // 基本格式整理
@@ -160,21 +161,27 @@ export function resolveSharesAtExDate(
   symbol: string,
   exDateStr: string,
   currentShares: number,
+  trades: Trade[] = [],
 ): { shares: number; source: SharesSource } {
-  const exact = sharesBeforeExDate(snapshots, symbol, exDateStr);
-  if (exact !== null) return { shares: exact, source: 'before-ex-date' };
-
+  const exDate = normalizeDateStr(exDateStr);
+  let before: HoldingSnapshot | null = null;
+  let beforeDate = '';
   let earliest: HoldingSnapshot | null = null;
   let earliestDate = '';
   for (const snap of snapshots || []) {
     const d = normalizeDateStr(snap?.date);
-    if (d && (!earliestDate || d < earliestDate)) {
-      earliest = snap;
-      earliestDate = d;
-    }
+    if (!d) continue;
+    if (d < exDate && d > beforeDate) { before = snap; beforeDate = d; }
+    if (!earliestDate || d < earliestDate) { earliest = snap; earliestDate = d; }
   }
-  if (earliest) return { shares: sharesInSnapshot(earliest, symbol), source: 'earliest-snapshot' };
-  return { shares: Number(currentShares) || 0, source: 'current' };
+  // 有交易紀錄時，用成交日修正快照（補登、除息日當天的買賣都能算對）
+  if (before) {
+    return { shares: adjustSharesWithTrades(sharesInSnapshot(before, symbol), beforeDate, exDate, trades), source: 'before-ex-date' };
+  }
+  if (earliest) {
+    return { shares: adjustSharesWithTrades(sharesInSnapshot(earliest, symbol), earliestDate, exDate, trades), source: 'earliest-snapshot' };
+  }
+  return { shares: sharesAtExDateFromCurrent(Number(currentShares) || 0, exDate, trades), source: 'current' };
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +256,7 @@ export function computeYearDividends(params: {
     const name = (stock.name && stock.name !== symbol) ? stock.name : (stock.dividendInfo?.name || symbol);
     for (const rec of getDividendRecords(stock.dividendInfo, stock)) {
       if (!rec.payDate.startsWith(yearPrefix) || rec.amount <= 0) continue;
-      const { shares, source } = resolveSharesAtExDate(snapshots, symbol, rec.exDate, Number(stock.shares) || 0);
+      const { shares, source } = resolveSharesAtExDate(snapshots, symbol, rec.exDate, Number(stock.shares) || 0, stock.trades || []);
       if (shares <= 0) continue;
       const net = estimateNetPayment(rec.amount, shares);
       if (net <= 0) continue;
