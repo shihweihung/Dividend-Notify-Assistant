@@ -73,6 +73,7 @@ import { twMerge } from 'tailwind-merge';
 // import { fetchDividendData } from './services/geminiService';
 import { type StockEntry, type CalendarEvent, type DividendInfo, normalizeSymbol, deduplicateStocks } from './types';
 import { safeStorage } from './utils/storage';
+import { addOneMonth, computeYearDividends, estimateNetPayment, resolveSharesAtExDate, yearsWithDividends, type YearSummary } from '../shared/dividendCalc';
 import { 
   auth, 
   db, 
@@ -343,31 +344,10 @@ function MainApp() {
   }, [user, isAuthReady, stocks, cash]);
 
   // Helper to get exact shares held on or before a given ex-dividend date (exDateStr: YYYY-MM-DD)
+  // 除息日前一天的持股（與 Telegram 通知共用 shared/dividendCalc.ts 的規則）
   const getSharesOnExDate = useCallback((symbol: string, exDateStr: string, currentShares: number): number => {
-    if (!snapshots || snapshots.length === 0 || !exDateStr) {
-      return currentShares;
-    }
-    
-    // Find snapshots on or before exDateStr
-    const validSnapshots = snapshots.filter(s => s.date <= exDateStr);
-    if (validSnapshots.length > 0) {
-      const latestSnap = validSnapshots[validSnapshots.length - 1];
-      const targetStock = latestSnap.stocks?.find((s: any) => s.symbol === symbol);
-      if (targetStock && targetStock.shares !== undefined) {
-        return Number(targetStock.shares);
-      }
-    }
-
-    // Fallback: If exDate is before the earliest snapshot, use earliest snapshot's shares
-    const earliestSnap = snapshots[0];
-    if (exDateStr < earliestSnap.date) {
-      const targetStock = earliestSnap.stocks?.find((s: any) => s.symbol === symbol);
-      if (targetStock && targetStock.shares !== undefined) {
-        return Number(targetStock.shares);
-      }
-    }
-
-    return currentShares;
+    if (!exDateStr) return currentShares;
+    return resolveSharesAtExDate(snapshots, symbol, exDateStr, currentShares).shares;
   }, [snapshots]);
 
   // Notification Helpers (【備註】已由後端 Telegram 推播取代，此為輔助功能)
@@ -1182,13 +1162,11 @@ function MainApp() {
       let pending = 0;
       let total = 0;
 
-      if (stock.dividendInfo) {
-        const info = stock.dividendInfo;
-        const rAmount = (info.receivedAmountCurrentYear || (info as any).receivedAmount2026 || 0) * shares;
-        const pAmount = (info.pendingAmountCurrentYear || (info as any).pendingAmount2026 || 0) * shares;
-        received = rAmount;
-        pending = pAmount;
-        total = rAmount + pAmount;
+      const yearItem = currentYearSummary.byStock.find(s => s.symbol === normalizeSymbol(symbol));
+      if (yearItem) {
+        received = yearItem.received;
+        pending = yearItem.pending;
+        total = yearItem.total;
       }
 
       return [
@@ -1372,15 +1350,7 @@ function MainApp() {
 
             // If payment date is empty but ex-dividend date exists, estimate it as ex-dividend date + 1 month
             if (!payDateStr && exDateStr) {
-              const parsedEx = parseISO(exDateStr);
-              if (parsedEx && !isNaN(parsedEx.getTime())) {
-                const estPay = new Date(parsedEx);
-                estPay.setMonth(estPay.getMonth() + 1);
-                const yyyy = estPay.getFullYear();
-                const mm = String(estPay.getMonth() + 1).padStart(2, '0');
-                const dd = String(estPay.getDate()).padStart(2, '0');
-                payDateStr = `${yyyy}-${mm}-${dd}`;
-              }
+              payDateStr = addOneMonth(exDateStr);
             }
 
             const exDate = exDateStr ? parseISO(exDateStr) : null;
@@ -1410,7 +1380,7 @@ function MainApp() {
                   type: 'payment',
                   stockName: stock.name,
                   symbol: stock.symbol,
-                  amount: (div.amount || stock.dividendInfo?.amount || 0) * effectiveShares
+                  amount: estimateNetPayment(div.amount || stock.dividendInfo?.amount || 0, effectiveShares)
                 });
               }
             }
@@ -1446,7 +1416,7 @@ function MainApp() {
                 type: 'payment',
                 stockName: stock.name,
                 symbol: stock.symbol,
-                amount: stock.dividendInfo.amount * effectiveShares
+                amount: estimateNetPayment(stock.dividendInfo.amount, effectiveShares)
               });
             }
           }
@@ -1496,290 +1466,63 @@ function MainApp() {
     return () => clearTimeout(timer);
   }, [notificationPermission, notificationsEnabled, stocks, calendarEvents]);
 
+  // 今天日期，用來即時判斷已領 / 未領；每分鐘檢查一次，跨日自動更新
+  const [todayStr, setTodayStr] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = format(new Date(), 'yyyy-MM-dd');
+      setTodayStr(prev => (prev === now ? prev : now));
+    }, 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // 今年（依發放日）的股息彙總，供卡片與 CSV 使用
+  const currentYearSummary = useMemo<YearSummary>(() => computeYearDividends({
+    stocks,
+    snapshots,
+    year: Number(todayStr.slice(0, 4)),
+    todayStr,
+  }), [stocks, snapshots, todayStr]);
+
   const dividendStats = useMemo(() => {
-    const today = startOfToday();
-    const currentYear = today.getFullYear();
-    const todayStr = format(today, 'yyyy-MM-dd');
-    
-    let received = 0;
-    let pending = 0;
-    let total = 0;
-    const distribution: Record<string, number> = {};
-    const monthlyReceivedTotals = Array(12).fill(0);
-    const monthlyPendingTotals = Array(12).fill(0);
-    const monthlyBreakdown: { symbol: string; amount: number; isPending: boolean }[][] = Array.from({ length: 12 }, () => []);
+    const summary = computeYearDividends({ stocks, snapshots, year: selectedYear, todayStr });
 
-    stocks.forEach(stock => {
-      let stockTotal = 0;
-      if (stock.dividendInfo) {
-        const info = stock.dividendInfo;
-        const symbol = stock.symbol;
-        
-        // Check if we have monthly arrays for current year. 
-        // If so, ALWAYS use them for currentYear to remain 100% accurate and backward-compatible with saved user portfolios.
-        const hasMonthlyDistribution = selectedYear === currentYear && 
-          ((info.monthlyDistribution && info.monthlyDistribution.some(v => v > 0)) || 
-           (info.pendingMonthlyDistribution && info.pendingMonthlyDistribution.some(v => v > 0)));
+    const distributionData = summary.byStock
+      .filter(s => s.total > 0)
+      .map(s => ({ name: s.symbol, value: s.total }));
 
-        if (hasMonthlyDistribution) {
-            let rAmount = 0;
-            let pAmount = 0;
-
-            if (info.monthlyDistribution && Array.isArray(info.monthlyDistribution)) {
-              info.monthlyDistribution.forEach((monthlyAmount, monthIdx) => {
-                if (monthIdx < 12 && monthlyAmount > 0) {
-                  const monthDateStr = `${selectedYear}-${String(monthIdx + 1).padStart(2, '0')}-15`;
-                  const effectiveShares = getSharesOnExDate(stock.symbol, monthDateStr, stock.shares);
-                  const val = monthlyAmount * effectiveShares;
-                  if (val > 0) {
-                    rAmount += val;
-                    monthlyReceivedTotals[monthIdx] += val;
-                    monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: false });
-                  }
-                }
-              });
-            }
-
-            if (info.pendingMonthlyDistribution && Array.isArray(info.pendingMonthlyDistribution)) {
-              info.pendingMonthlyDistribution.forEach((monthlyAmount, monthIdx) => {
-                if (monthIdx < 12 && monthlyAmount > 0) {
-                  const monthDateStr = `${selectedYear}-${String(monthIdx + 1).padStart(2, '0')}-15`;
-                  const effectiveShares = getSharesOnExDate(stock.symbol, monthDateStr, stock.shares);
-                  const val = monthlyAmount * effectiveShares;
-                  if (val > 0) {
-                    pAmount += val;
-                    monthlyPendingTotals[monthIdx] += val;
-                    monthlyBreakdown[monthIdx].push({ symbol, amount: val, isPending: true });
-                  }
-                }
-              });
-            }
-
-            received += rAmount;
-            pending += pAmount;
-            total += (rAmount + pAmount);
-            stockTotal = rAmount + pAmount;
-          } else {
-            // Use history (or fallback to latest single payment if history is totally empty)
-            const hasHistory = info.history && Array.isArray(info.history) && info.history.length > 0;
-            const historyItems = hasHistory
-              ? info.history!
-              : [{
-                  date: info.exDividendDate || '',
-                  amount: info.amount || 0,
-                  paymentDate: info.paymentDate || ''
-                }];
-
-            historyItems.forEach(div => {
-              if (!div.date) return;
-              
-              let payDateStr = div.paymentDate || "";
-              let pYear = 0;
-              let pMonth = 0;
-              let formattedPayDateStr = "";
-              
-              const parts = payDateStr.split('-');
-              if (parts.length === 3) {
-                pYear = parseInt(parts[0]);
-                pMonth = parseInt(parts[1]) - 1;
-                formattedPayDateStr = payDateStr;
-              } else {
-                // Estimate pay date from ex-dividend date (date + 1 month)
-                const exParts = div.date.split('-');
-                if (exParts.length === 3) {
-                  let yearVal = parseInt(exParts[0]);
-                  let monthVal = parseInt(exParts[1]); // 1-12
-                  monthVal += 1;
-                  if (monthVal > 12) {
-                    monthVal = 1;
-                    yearVal += 1;
-                  }
-                  pYear = yearVal;
-                  pMonth = monthVal - 1;
-                  formattedPayDateStr = `${yearVal}-${String(monthVal).padStart(2, '0')}-${exParts[2]}`;
-                }
-              }
-              
-              if (pYear === selectedYear && pMonth >= 0 && pMonth < 12) {
-                const effectiveShares = getSharesOnExDate(stock.symbol, div.date, stock.shares);
-                const val = div.amount * effectiveShares;
-                if (val > 0) {
-                  let isPending = false;
-                  if (selectedYear < currentYear) {
-                    isPending = false;
-                  } else if (selectedYear > currentYear) {
-                    isPending = true;
-                  } else {
-                    isPending = formattedPayDateStr > todayStr;
-                  }
-                  
-                  if (isPending) {
-                    pending += val;
-                    monthlyPendingTotals[pMonth] += val;
-                    monthlyBreakdown[pMonth].push({ symbol, amount: val, isPending: true });
-                  } else {
-                    received += val;
-                    monthlyReceivedTotals[pMonth] += val;
-                    monthlyBreakdown[pMonth].push({ symbol, amount: val, isPending: false });
-                  }
-                  total += val;
-                  stockTotal += val;
-                }
-              }
-            });
-          }
-        }
-
-        // Distribution data (using total for the pie chart to show overall contribution)
-        if (stockTotal > 0) {
-          distribution[stock.name] = (distribution[stock.name] || 0) + stockTotal;
-        }
-      })
-
-    const distributionData = Object.entries(distribution)
-      .map(([name, value]) => {
-        // Try to find the symbol for this name
-        const stock = stocks.find(s => s.name === name);
-        return { name: stock ? stock.symbol : name, value };
-      })
-      .filter(item => item.value > 0)
-      .sort((a, b) => b.value - a.value);
-
-    const monthlyData = monthlyReceivedTotals.map((amount, index) => ({
+    const monthlyData = summary.monthly.map((m, index) => ({
       month: `${index + 1}月`,
-      amount: Math.round(amount),
-      pendingAmount: Math.round(monthlyPendingTotals[index]),
-      breakdown: monthlyBreakdown[index].sort((a, b) => b.amount - a.amount)
+      amount: m.received,
+      pendingAmount: m.pending,
+      breakdown: m.items.map(item => ({ symbol: item.symbol, amount: item.net, isPending: item.isPending })),
     }));
 
-    return { received, pending, total, distributionData, monthlyData };
-  }, [stocks, selectedYear, getSharesOnExDate]);
+    return { received: summary.received, pending: summary.pending, total: summary.total, distributionData, monthlyData };
+  }, [stocks, snapshots, selectedYear, todayStr]);
 
+  // 歷年股息：只列「開始記錄持股之後」且有股息資料的年份（更早的年份不知道當時持股，算了也不準）
   const yearlyHistoryData = useMemo(() => {
-    const today = startOfToday();
-    const currentYear = today.getFullYear();
-    const todayStr = format(today, 'yyyy-MM-dd');
-    const years = [2026, 2027, 2028, 2029, 2030];
-    
+    const currentYear = Number(todayStr.slice(0, 4));
+    const firstTrackedYear = snapshots.length > 0 ? Number(snapshots[0].date.slice(0, 4)) : currentYear;
+    const years = yearsWithDividends(stocks).filter(yr => yr >= Math.min(firstTrackedYear, currentYear));
+    if (!years.includes(currentYear)) years.push(currentYear);
+    years.sort((a, b) => a - b);
+
     return years.map(yr => {
-      let total = 0;
-      let received = 0;
-      let pending = 0;
+      const summary = computeYearDividends({ stocks, snapshots, year: yr, todayStr });
       const breakdown: Record<string, number> = {};
-
-      stocks.forEach(stock => {
-        if (!stock.dividendInfo) return;
-        const info = stock.dividendInfo;
-        const symbol = stock.symbol;
-        let stockTotalForYear = 0;
-
-        const hasMonthlyDistribution = yr === currentYear && 
-          ((info.monthlyDistribution && info.monthlyDistribution.some(v => v > 0)) || 
-           (info.pendingMonthlyDistribution && info.pendingMonthlyDistribution.some(v => v > 0)));
-
-          if (hasMonthlyDistribution) {
-            let rAmount = 0;
-            let pAmount = 0;
-
-            if (info.monthlyDistribution && Array.isArray(info.monthlyDistribution)) {
-              info.monthlyDistribution.forEach((monthlyAmount, monthIdx) => {
-                if (monthlyAmount > 0) {
-                  const monthDateStr = `${yr}-${String(monthIdx + 1).padStart(2, '0')}-15`;
-                  const effectiveShares = getSharesOnExDate(stock.symbol, monthDateStr, stock.shares);
-                  rAmount += monthlyAmount * effectiveShares;
-                }
-              });
-            }
-
-            if (info.pendingMonthlyDistribution && Array.isArray(info.pendingMonthlyDistribution)) {
-              info.pendingMonthlyDistribution.forEach((monthlyAmount, monthIdx) => {
-                if (monthlyAmount > 0) {
-                  const monthDateStr = `${yr}-${String(monthIdx + 1).padStart(2, '0')}-15`;
-                  const effectiveShares = getSharesOnExDate(stock.symbol, monthDateStr, stock.shares);
-                  pAmount += monthlyAmount * effectiveShares;
-                }
-              });
-            }
-
-            received += rAmount;
-            pending += pAmount;
-            total += (rAmount + pAmount);
-            stockTotalForYear = rAmount + pAmount;
-          } else {
-            const hasHistory = info.history && Array.isArray(info.history) && info.history.length > 0;
-            const historyItems = hasHistory
-              ? info.history!
-              : [{
-                  date: info.exDividendDate || '',
-                  amount: info.amount || 0,
-                  paymentDate: info.paymentDate || ''
-                }];
-
-            historyItems.forEach(div => {
-              if (!div.date) return;
-              
-              let payDateStr = div.paymentDate || "";
-              let pYear = 0;
-              let formattedPayDateStr = "";
-              
-              const parts = payDateStr.split('-');
-              if (parts.length === 3) {
-                pYear = parseInt(parts[0]);
-                formattedPayDateStr = payDateStr;
-              } else {
-                const exParts = div.date.split('-');
-                if (exParts.length === 3) {
-                  let yearVal = parseInt(exParts[0]);
-                  let monthVal = parseInt(exParts[1]);
-                  monthVal += 1;
-                  if (monthVal > 12) {
-                    monthVal = 1;
-                    yearVal += 1;
-                  }
-                  pYear = yearVal;
-                  formattedPayDateStr = `${yearVal}-${String(monthVal).padStart(2, '0')}-${exParts[2]}`;
-                }
-              }
-              
-              if (pYear === yr) {
-                const effectiveShares = getSharesOnExDate(stock.symbol, div.date, stock.shares);
-                const val = div.amount * effectiveShares;
-                if (val > 0) {
-                  let isPending = false;
-                  if (yr < currentYear) {
-                    isPending = false;
-                  } else if (yr > currentYear) {
-                    isPending = true;
-                  } else {
-                    isPending = formattedPayDateStr > todayStr;
-                  }
-                  
-                  if (isPending) {
-                    pending += val;
-                  } else {
-                    received += val;
-                  }
-                  total += val;
-                  stockTotalForYear += val;
-                }
-              }
-            });
-          }
-        
-        if (stockTotalForYear > 0) {
-          breakdown[symbol] = stockTotalForYear;
-        }
-      });
-
+      summary.byStock.forEach(s => { breakdown[s.symbol] = s.total; });
       return {
         year: yr,
-        total: Math.round(total),
-        received: Math.round(received),
-        pending: Math.round(pending),
-        breakdown
+        total: summary.total,
+        received: summary.received,
+        pending: summary.pending,
+        breakdown,
+        byStock: summary.byStock,
       };
     }).filter(s => s.total > 0 || s.year === currentYear);
-  }, [stocks, getSharesOnExDate]);
+  }, [stocks, snapshots, todayStr]);
 
   const [componentLimit, setComponentLimit] = useState<number>(10);
   const portfolioData = useMemo(() => {
@@ -1980,10 +1723,7 @@ function MainApp() {
   const COLORS = ['#6366f1', '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#f43f5e', '#fb7185', '#fda4af', '#fecdd3', '#ffe4e6'];
 
   const [activeTab, setActiveTab] = useState<'calendar' | 'list' | 'history'>('calendar');
-  const [historySelectedYear, setHistorySelectedYear] = useState<number>(() => {
-    const cy = new Date().getFullYear();
-    return cy >= 2026 && cy <= 2030 ? cy : 2026;
-  });
+  const [historySelectedYear, setHistorySelectedYear] = useState<number>(() => new Date().getFullYear());
   const [apiUsage, setApiUsage] = useState<{ count: number, date: string }>({ count: 0, date: new Date().toDateString() });
 
   // Load API usage from safeStorage
@@ -2548,7 +2288,7 @@ function MainApp() {
                         darkMode ? "bg-slate-800 border-slate-700 text-slate-200" : "bg-slate-100 border-slate-200 text-slate-700"
                       )}
                     >
-                      {[2026, 2027, 2028, 2029, 2030].map(yr => (
+                      {yearlyHistoryData.map(item => item.year).map(yr => (
                         <option key={yr} value={yr}>{yr} 年</option>
                       ))}
                     </select>
@@ -3080,7 +2820,7 @@ function MainApp() {
                   
                   {/* Elegant Year Selector Pills */}
                   <div className="flex gap-1 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
-                    {[2026, 2027, 2028, 2029, 2030].map(yr => (
+                    {yearlyHistoryData.map(item => item.year).map(yr => (
                       <button
                         key={yr}
                         onClick={() => setHistorySelectedYear(yr)}
@@ -3136,26 +2876,15 @@ function MainApp() {
                             darkMode ? "border-slate-800 text-slate-400" : "border-slate-100 text-slate-500"
                           )}>
                             <th className="py-2.5 px-2">股票</th>
-                            <th className="py-2.5 px-2 text-right">持有股數</th>
-                            <th className="py-2.5 px-2 text-right">預估每股股利</th>
-                            <th className="py-2.5 px-2 text-right">預計股息</th>
+                            <th className="py-2.5 px-2 text-right">發放次數</th>
+                            <th className="py-2.5 px-2 text-right">全年每股</th>
+                            <th className="py-2.5 px-2 text-right">全年股息</th>
                           </tr>
                         </thead>
                         <tbody>
                           {(() => {
                             const yrData = yearlyHistoryData.find(item => item.year === historySelectedYear);
-                            const breakdown = yrData ? yrData.breakdown : {};
-                            
-                            // Get stocks and sort by their dividends in active year
-                            const sortedStocks = [...stocks]
-                              .filter(stock => stock.shares > 0)
-                              .map(stock => {
-                                const amount = breakdown[stock.symbol] || 0;
-                                return { stock, amount };
-                              })
-                              .sort((a, b) => b.amount - a.amount);
-
-                            const activePayouts = sortedStocks.filter(({ amount }) => amount > 0);
+                            const activePayouts = yrData ? yrData.byStock.filter(s => s.total > 0) : [];
 
                             if (activePayouts.length === 0) {
                               return (
@@ -3167,32 +2896,24 @@ function MainApp() {
                               );
                             }
 
-                            return activePayouts.map(({ stock, amount }) => {
-                              // Estimate DPS for this year
-                              let dps = 0;
-                              if (stock.manualDividendAdjustment !== undefined && stock.manualDividendAdjustment !== null) {
-                                dps = stock.manualDividendAdjustment / stock.shares;
-                              } else if (stock.dividendInfo) {
-                                dps = stock.dividendInfo.amount || 0;
-                              }
-
+                            return activePayouts.map((item) => {
                               return (
-                                <tr key={stock.symbol} className={cn(
+                                <tr key={item.symbol} className={cn(
                                   "border-b last:border-0 font-bold transition-colors",
                                   darkMode ? "border-slate-800/40 hover:bg-slate-800/10 text-slate-300" : "border-slate-50 hover:bg-slate-50/50 text-slate-700"
                                 )}>
                                   <td className="py-2 px-2 min-w-[100px]">
-                                    <div className="truncate font-black">{stock.name}</div>
-                                    <div className="text-[9px] text-slate-400 font-medium">{stock.symbol}</div>
+                                    <div className="truncate font-black">{item.name}</div>
+                                    <div className="text-[9px] text-slate-400 font-medium">{item.symbol}</div>
                                   </td>
                                   <td className="py-2 px-2 text-right font-mono text-slate-400">
-                                    {stock.shares.toLocaleString()}
+                                    {item.payments} 次
                                   </td>
                                   <td className="py-2 px-2 text-right font-mono text-slate-400">
-                                    ${dps > 0 ? dps.toFixed(2) : '-'}
+                                    ${item.perShareTotal > 0 ? Number(item.perShareTotal.toFixed(4)).toString() : '-'}
                                   </td>
                                   <td className="py-2 px-2 text-right font-mono text-indigo-500 font-extrabold">
-                                    ${Math.round(amount).toLocaleString()}
+                                    ${item.total.toLocaleString()}
                                   </td>
                                 </tr>
                               );
@@ -3840,7 +3561,7 @@ function MainApp() {
                                                       : "text-indigo-500"
                                                   )}>
                                                     {stock.dividendInfo.exDividendDate?.startsWith(new Date().getFullYear().toString()) 
-                                                      ? `$${(stock.dividendInfo.amount * getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate, stock.shares)).toLocaleString()}`
+                                                      ? `$${estimateNetPayment(stock.dividendInfo.amount, getSharesOnExDate(stock.symbol, stock.dividendInfo.exDividendDate, stock.shares)).toLocaleString()}`
                                                       : '尚未公佈'}
                                                   </span>
                                                 </div>
@@ -3850,12 +3571,7 @@ function MainApp() {
                                                 <div className={cn("p-2 rounded-xl", darkMode ? "bg-emerald-950/20" : "bg-emerald-50/30")}>
                                                   <p className="text-[9px] sm:text-[10px] font-bold text-emerald-500 uppercase">今年已領</p>
                                                   <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-emerald-400" : "text-emerald-700")}>
-                                                    {(() => {
-                                                      const exDateForCalc = stock.dividendInfo?.exDividendDate || `${new Date().getFullYear()}-06-15`;
-                                                      const effectiveExShares = getSharesOnExDate(stock.symbol, exDateForCalc, stock.shares);
-                                                      const recAmt = ((stock.dividendInfo as any).receivedAmountCurrentYear || (stock.dividendInfo as any).receivedAmount2026 || 0) * effectiveExShares;
-                                                      return `$${recAmt.toLocaleString()}`;
-                                                    })()}
+                                                    ${(currentYearSummary.byStock.find(s => s.symbol === normalizeSymbol(stock.symbol))?.received || 0).toLocaleString()}
                                                   </p>
                                                 </div>
 
@@ -3863,7 +3579,7 @@ function MainApp() {
                                                   <div className={cn("p-2 rounded-xl", darkMode ? "bg-amber-950/20" : "bg-amber-50/30")}>
                                                     <p className="text-[9px] sm:text-[10px] font-bold text-amber-500 uppercase">今年未領</p>
                                                     <p className={cn("text-xs font-bold mt-0.5", darkMode ? "text-amber-400" : "text-amber-700")}>
-                                                      ${(((stock.dividendInfo as any).pendingAmountCurrentYear || (stock.dividendInfo as any).pendingAmount2026 || 0) * stock.shares).toLocaleString()}
+                                                      ${(currentYearSummary.byStock.find(s => s.symbol === normalizeSymbol(stock.symbol))?.pending || 0).toLocaleString()}
                                                     </p>
                                                   </div>
                                                 )}
