@@ -1,3 +1,4 @@
+import type { Trade } from '../shared/trades';
 export type EtfComponent = {
   name: string;
   symbol?: string;
@@ -40,6 +41,7 @@ export type StockEntry = {
   soldShares?: number; // Shares sold when cleared
   manualDividendAdjustment?: number;
   dividendInfo?: DividendInfo;
+  trades?: Trade[]; // 買進 / 賣出紀錄（shared/trades.ts）
 }
 
 export type CalendarEvent = {
