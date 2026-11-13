@@ -35,7 +35,8 @@ import {
 import { AIScreenshotModal } from './components/AIScreenshotModal';
 import { PortfolioTrendChart } from './components/PortfolioTrendChart';
 import { TradeModal } from './components/TradeModal';
-import { applyTrade, undoLastTrade, sortTrades, totalRealizedPnl, type Trade, type TradeSide } from '../shared/trades';
+import { TradeSection } from './components/TradeSection';
+import { applyTrade, undoLastTrade, totalRealizedPnl, type TradeSide } from '../shared/trades';
 import { 
   PieChart as RechartsPieChart, 
   Pie, 
@@ -3430,61 +3431,13 @@ function MainApp() {
                                           </AnimatePresence>
 
                                           {/* 0. 買進 / 賣出 與交易紀錄 */}
-                                          <div className="space-y-2">
-                                            <div className="grid grid-cols-2 gap-2">
-                                              <button
-                                                onClick={() => setTradeModal({ symbol: stock.symbol, side: 'buy' })}
-                                                className="h-11 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-sm font-black"
-                                              >
-                                                買進
-                                              </button>
-                                              <button
-                                                onClick={() => setTradeModal({ symbol: stock.symbol, side: 'sell' })}
-                                                disabled={stock.shares <= 0}
-                                                className="h-11 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-black disabled:opacity-30"
-                                              >
-                                                賣出
-                                              </button>
-                                            </div>
-                                            {stock.trades && stock.trades.length > 0 && (
-                                              <div className={cn(
-                                                "rounded-2xl p-3 text-xs space-y-2",
-                                                darkMode ? "bg-slate-800/60" : "bg-slate-50"
-                                              )}>
-                                                <div className="flex items-center justify-between">
-                                                  <span className="font-bold text-slate-400">交易紀錄</span>
-                                                  {stock.trades.some(t => t.side === 'sell') && (
-                                                    <span className="font-bold">
-                                                      已實現損益{' '}
-                                                      <span className={totalRealizedPnl(stock.trades) >= 0 ? "text-rose-500" : "text-emerald-500"}>
-                                                        {totalRealizedPnl(stock.trades) >= 0 ? '+' : '-'}${Math.abs(totalRealizedPnl(stock.trades)).toLocaleString()}
-                                                      </span>
-                                                    </span>
-                                                  )}
-                                                </div>
-                                                {sortTrades(stock.trades).slice().reverse().slice(0, 5).map((t: Trade) => (
-                                                  <div key={t.id} className="flex items-center justify-between gap-2">
-                                                    <span className="text-slate-400 shrink-0">{t.tradeDate.slice(5).replace('-', '/')}</span>
-                                                    <span className={cn("font-black shrink-0", t.side === 'buy' ? "text-rose-500" : "text-emerald-600")}>
-                                                      {t.side === 'buy' ? '買' : '賣'}
-                                                    </span>
-                                                    <span className="flex-1 text-right font-bold">{t.shares.toLocaleString()} 股 @ ${t.price}</span>
-                                                    {t.side === 'sell' && t.realizedPnl !== null && (
-                                                      <span className={cn("w-20 text-right font-bold", t.realizedPnl >= 0 ? "text-rose-500" : "text-emerald-500")}>
-                                                        {t.realizedPnl >= 0 ? '+' : '-'}${Math.abs(t.realizedPnl).toLocaleString()}
-                                                      </span>
-                                                    )}
-                                                  </div>
-                                                ))}
-                                                <button
-                                                  onClick={() => handleUndoLastTrade(stock.symbol)}
-                                                  className="w-full h-10 mt-1 rounded-lg text-xs font-bold text-slate-400 border border-dashed border-slate-400/40"
-                                                >
-                                                  復原最後一筆交易
-                                                </button>
-                                              </div>
-                                            )}
-                                          </div>
+                                          <TradeSection
+                                            shares={stock.shares}
+                                            trades={stock.trades}
+                                            darkMode={darkMode}
+                                            onTrade={(side) => setTradeModal({ symbol: stock.symbol, side })}
+                                            onUndo={() => handleUndoLastTrade(stock.symbol)}
+                                          />
 
                                           {/* 1. 持股/清倉與成本/賣價輸入 (User Inputs) */}
                                           <div className={cn(
