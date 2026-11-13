@@ -238,12 +238,12 @@ describe('領息金額：用除息日前的持股計算（持股變動不影響�
   });
 
   test('領息訊息顯示股數與單價，方便對帳', () => {
-    const msg = buildPaymentMessage({ stockName: '鴻海', symbol: '2317', amountPerShare: 1.2, shares: 3050, sharesFromCurrentHoldings: false });
+    const msg = buildPaymentMessage({ stockName: '鴻海', symbol: '2317', amountPerShare: 1.2, shares: 3050, sharesSource: 'before-ex-date' });
     assert.equal(msg, '💰 今天是 鴻海(2317) 的領息日！預計入帳 $3,650\n（3,050 股 × 每股 $1.2，已扣匯費 $10）');
   });
 
   test('用目前持股估算、發放日推估時，訊息要註明', () => {
-    const msg = buildPaymentMessage({ stockName: '鴻海', symbol: '2317', amountPerShare: 1, shares: 1000, sharesFromCurrentHoldings: true, payDateEstimated: true });
+    const msg = buildPaymentMessage({ stockName: '鴻海', symbol: '2317', amountPerShare: 1, shares: 1000, sharesSource: 'current', payDateEstimated: true });
     assert.match(msg, /以目前持股估算/);
     assert.match(msg, /以除息日後一個月推估/);
   });

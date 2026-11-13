@@ -4,7 +4,7 @@ import { normalizeSymbol } from "../lib/symbols";
 import {
   findDividendEventsForDate,
   collectDividendCandidates,
-  sharesBeforeExDate,
+  resolveSharesAtExDate,
   buildPaymentMessage,
   type HoldingSnapshot,
 } from "../lib/dividendEvents";
@@ -63,9 +63,9 @@ export async function runDividendNotifyCore() {
         if (evt.type === 'ex-dividend') {
           msgText = `📅 今天是 ${stockName}(${symbol}) 的除息日！每股 $${evt.amount}`;
         } else {
-          const snapShares = evt.exDateStr ? sharesBeforeExDate(snapshots, symbol, evt.exDateStr) : null;
-          if (snapShares === null && !holdsNow) continue; // 不知道當時股數，也不是目前持股，無從估算
-          const shares = snapShares === null ? (Number(stock.shares) || 0) : snapShares;
+          // 已賣光的股票目前持股算 0；能領幾股以除息日前一天的快照為準（規則與網頁共用）
+          const { shares, source } = resolveSharesAtExDate(
+            snapshots, symbol, evt.exDateStr || todayStr, holdsNow ? (Number(stock.shares) || 0) : 0);
           if (shares <= 0) {
             console.log(`[Dividend Notify] ${symbol} not held before ex-date ${evt.exDateStr} for ChatID ${chatId}, no payment notice.`);
             continue;
@@ -75,7 +75,7 @@ export async function runDividendNotifyCore() {
             symbol,
             amountPerShare: evt.amount,
             shares,
-            sharesFromCurrentHoldings: snapShares === null,
+            sharesSource: source,
             payDateEstimated: evt.payDateEstimated,
           });
         }

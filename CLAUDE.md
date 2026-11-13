@@ -6,6 +6,7 @@
 ## 後端結構
 - `server.ts`:只負責啟動(Firestore 初始化、掛 router、Vite/靜態檔、錯誤處理)
 - `server/context.ts`:共用狀態(adminDb、firestoreAvailable、in-memory fallback)
+- `shared/`:前後端共用的純函式(股息計算),不可引用 Firebase / React / Express
 - `server/lib/`:純函式,不碰網路與資料庫,必須有測試
   - `symbols.ts`(NAME_MAP、resolveSymbolFromName)、`portfolioMerge.ts`(mergeAndValidateStocks)、`dividendEvents.ts`(股息事件判斷)
 - `server/services/`:商業流程(每日批次、股息通知、Telegram bot、截圖解析)
@@ -52,7 +53,12 @@
 - 除息後才賣掉的股票仍要發領息通知(`collectDividendCandidates` 會從快照找回來)
 - 找不到除息前快照時才用目前股數,且訊息必須註明「以目前持股估算」
 - 金額 = 股數 × 每股股利,元以下捨去,再扣匯費 10 元;不扣二代健保(使用者決定)
-- 相關邏輯放在 `server/lib/dividendEvents.ts`,測試在 `tests/core.spec.ts`、`tests/dividendNotify.spec.ts`
+- 除息日早於第一份快照時,用最早一份快照估算;完全沒有快照才用目前股數,兩者都要標示是估算
+- 規則寫在 `shared/dividendCalc.ts`,網頁(今年已領/未領、月曆、歷年股息)與 Telegram 通知共用同一份,
+  不可在 `src/App.tsx` 或 `server/` 另外寫一套算法
+- 「已領 / 未領」一律用今天日期即時判斷(發放日 <= 今天就是已領),不可使用後端存下來的
+  `receivedAmountCurrentYear`、`monthlyDistribution` 等欄位(那是抓資料當下的結果,過了發放日不會更新)
+- 測試在 `tests/dividendCalc.spec.ts`、`tests/core.spec.ts`、`tests/dividendNotify.spec.ts`
 
 ## 使用情境(做取捨時的依據)
 - 使用者只有本人與少數家人,不需要為大量使用者設計
