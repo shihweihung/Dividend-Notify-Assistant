@@ -15,6 +15,65 @@
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a" />
     <meta name="theme-color" content="#ffffff" />
+    <script>
+      (function() {
+        function updateSafeArea() {
+          try {
+            var probe = document.createElement('div');
+            probe.style.cssText = 'position:fixed;top:0;left:0;height:env(safe-area-inset-top,0px);width:1px;visibility:hidden;pointer-events:none;z-index:-1;';
+            document.documentElement.appendChild(probe);
+            var envTop = probe.offsetHeight;
+            document.documentElement.removeChild(probe);
+
+            var isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || 
+                        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+            var w = Math.min(window.screen.width, window.screen.height);
+            var h = Math.max(window.screen.width, window.screen.height);
+            var isLandscape = (typeof window.orientation !== 'undefined' && Math.abs(window.orientation) === 90) || 
+                              (window.innerWidth > window.innerHeight);
+
+            // Dynamic Island iPhones (iPhone 14 Pro, 14 Pro Max, 15 series, 16 series)
+            var isDynamicIsland = isIOS && (
+              (w === 393 && h === 852) || // iPhone 14 Pro, 15, 15 Pro, 16
+              (w === 430 && h === 932) || // iPhone 14 Pro Max, 15 Plus, 15 Pro Max, 16 Plus
+              (w === 402 && h === 874) || // iPhone 16 Pro
+              (w === 440 && h === 956)    // iPhone 16 Pro Max
+            );
+
+            // Notched iPhones (iPhone X, XS, 11, 12, 13, 14)
+            var isNotched = isIOS && (
+              (w === 375 && h === 812) ||
+              (w === 414 && h === 896) ||
+              (w === 390 && h === 844) ||
+              (w === 428 && h === 926)
+            );
+
+            var fallbackTop = 0;
+            if (!isLandscape) {
+              if (isDynamicIsland) {
+                fallbackTop = 54;
+              } else if (isNotched) {
+                fallbackTop = 47;
+              } else if (isIOS && (window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches)) {
+                fallbackTop = 20;
+              }
+            }
+
+            var finalTop = Math.max(envTop || 0, fallbackTop);
+            document.documentElement.style.setProperty('--safe-area-inset-top', finalTop + 'px');
+            document.documentElement.style.setProperty('--sat', finalTop + 'px');
+          } catch (e) {
+            console.warn('Safe area detection error:', e);
+          }
+        }
+
+        updateSafeArea();
+        window.addEventListener('resize', updateSafeArea, { passive: true });
+        window.addEventListener('orientationchange', updateSafeArea, { passive: true });
+        document.addEventListener('DOMContentLoaded', updateSafeArea);
+      })();
+    </script>
     <style>
       /* Instant Splash Screen Styles - zero dependency, works before any CSS/JS loads */
       @media (prefers-color-scheme: dark) {
@@ -45,8 +104,8 @@
         align-items: center;
         justify-content: center;
         padding: 24px;
-        padding-top: calc(24px + env(safe-area-inset-top, 0px));
-        padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+        padding-top: calc(24px + max(var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px)));
+        padding-bottom: calc(24px + max(var(--safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px)));
         padding-left: calc(24px + env(safe-area-inset-left, 0px));
         padding-right: calc(24px + env(safe-area-inset-right, 0px));
         z-index: 9999;

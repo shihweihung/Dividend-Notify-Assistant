@@ -303,10 +303,10 @@ export const AIScreenshotModal: React.FC<AIScreenshotModalProps> = ({
     <div 
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-xs overflow-y-auto"
       style={{
-        paddingTop: 'max(12px, env(safe-area-inset-top, 0px))',
-        paddingBottom: 'max(12px, env(safe-area-inset-bottom, 0px))',
-        paddingLeft: 'max(12px, env(safe-area-inset-left, 0px))',
-        paddingRight: 'max(12px, env(safe-area-inset-right, 0px))',
+        paddingTop: 'max(12px, var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px))',
+        paddingBottom: 'max(12px, var(--safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px))',
+        paddingLeft: 'max(12px, var(--safe-area-inset-left, 0px), env(safe-area-inset-left, 0px))',
+        paddingRight: 'max(12px, var(--safe-area-inset-right, 0px), env(safe-area-inset-right, 0px))',
       }}
     >
       <div 
