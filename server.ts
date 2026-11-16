@@ -1,9 +1,10 @@
 import dotenv from "dotenv";
 dotenv.config({ override: true });
+import http from "http";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
-import { initFirestore } from "./server/context";
+import { initFirestoreClient, checkFirestoreHealth } from "./server/context";
 import { migrateLegacyJsonDb } from "./server/services/chatStore";
 import { startTelegramPolling } from "./server/services/telegramPolling";
 import { router as adminRouter } from "./server/routes/admin";
@@ -20,11 +21,11 @@ const __dirname = process.cwd();
 
 async function startServer() {
   const app = express();
+  const httpServer = http.createServer(app);
   const PORT = 3000;
 
-  // Firebase Admin 初始化與連線檢查、舊 JSON DB 搬遷
-  await initFirestore();
-  await migrateLegacyJsonDb();
+  // 同步建立 Firebase Admin 實例（不阻塞開埠）
+  initFirestoreClient();
 
   app.use("/api/parse-portfolio-screenshot", express.json({ limit: "25mb" }));
   app.use(express.json({ limit: "1mb" }));
@@ -36,18 +37,18 @@ async function startServer() {
 
   app.use(adminRouter);     // /api/admin/*
   app.use(telegramRouter);  // /api/telegram/*
-
-  // Trigger background poller for non-webhook bots
-  startTelegramPolling();
-
   app.use(dividendRouter);  // /api/dividend/:symbol
   app.use(portfolioRouter); // /api/parse-portfolio-screenshot
   app.use(cronRouter);      // /api/cron/*
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
+    const hmrDisabled = process.env.DISABLE_HMR === "true";
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: hmrDisabled ? false : { server: httpServer, overlay: false },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -69,8 +70,18 @@ async function startServer() {
     return res.status(500).json({ error: err?.message || "伺服器發生未預期錯誤" });
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    // 連線檢查、舊資料搬遷與 Telegram Polling 在背景啟動，避免延遲開埠
+    void (async () => {
+      try {
+        await checkFirestoreHealth();
+        await migrateLegacyJsonDb();
+        await startTelegramPolling();
+      } catch (bgErr) {
+        console.error("[Background Init Error]", bgErr);
+      }
+    })();
   });
 }
 

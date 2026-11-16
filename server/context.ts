@@ -28,32 +28,52 @@ export function logFirestoreError(context: string, error: any) {
   }
 }
 
-export async function initFirestore() {
-  // Initialize Firebase Admin dynamically securely connected to Firestore
+export function initFirestoreClient() {
+  if (ctx.adminDb) return;
   const fbConfigPath = path.join(process.cwd(), "firebase-applet-config.json");
-  if (fs.existsSync(fbConfigPath)) {
-    try {
-      const firebaseConfig = JSON.parse(fs.readFileSync(fbConfigPath, "utf-8"));
-      const firebaseApp = admin.apps.length > 0 ? admin.apps[0]! : admin.initializeApp({
-        projectId: firebaseConfig.projectId,
-      });
-      ctx.adminDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
-      console.log(`[Firebase Admin] Fully initialized with Project ID: ${firebaseConfig.projectId}, Database ID: ${firebaseConfig.firestoreDatabaseId}`);
-
-      // 2. Perform connection check at startup
-      try {
-        await ctx.adminDb.collection("telegram_chats").limit(1).get();
-        ctx.firestoreAvailable = true;
-        console.log("[Firestore] Health check passed");
-      } catch (hcErr: any) {
-        ctx.firestoreAvailable = false;
-        console.warn("[Firestore] Not accessible in this environment. Some features will be disabled.", hcErr.message || hcErr);
-      }
-    } catch (fbErr) {
-      console.error("[Firebase Admin] Initialization failed:", fbErr);
-      ctx.firestoreAvailable = false;
-    }
-  } else {
+  if (!fs.existsSync(fbConfigPath)) {
+    ctx.firestoreAvailable = false;
+    return;
+  }
+  try {
+    const firebaseConfig = JSON.parse(fs.readFileSync(fbConfigPath, "utf-8"));
+    const firebaseApp = admin.apps.length > 0 ? admin.apps[0]! : admin.initializeApp({
+      projectId: firebaseConfig.projectId,
+    });
+    ctx.adminDb = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
+    console.log(`[Firebase Admin] Fully initialized with Project ID: ${firebaseConfig.projectId}, Database ID: ${firebaseConfig.firestoreDatabaseId}`);
+  } catch (fbErr) {
+    console.error("[Firebase Admin] Initialization failed:", fbErr);
     ctx.firestoreAvailable = false;
   }
+}
+
+export async function checkFirestoreHealth(timeoutMs = 2500) {
+  if (!ctx.adminDb) {
+    ctx.firestoreAvailable = false;
+    return false;
+  }
+  let timeoutId: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      ctx.adminDb.collection("telegram_chats").limit(1).get(),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`Firestore health check timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+    ctx.firestoreAvailable = true;
+    console.log("[Firestore] Health check passed");
+    return true;
+  } catch (hcErr: any) {
+    ctx.firestoreAvailable = false;
+    console.warn("[Firestore] Not accessible in this environment. Some features will be disabled.", hcErr.message || hcErr);
+    return false;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+export async function initFirestore() {
+  initFirestoreClient();
+  await checkFirestoreHealth();
 }
