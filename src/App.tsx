@@ -1140,10 +1140,11 @@ function MainApp() {
           const stockRef = doc(db, 'users', user.uid, 'stocks', symbol);
           const existingStock = stocks.find(s => s.symbol === symbol);
           try {
+            // 只更新股息資料，不可寫入 shares：查詢期間使用者可能剛買賣，寫入舊股數會蓋掉交易結果
             await setDoc(stockRef, { 
               symbol: symbol,
               name: info.name || existingStock?.name || symbol,
-              shares: existingStock?.shares ?? 0,
+              ...(existingStock ? {} : { shares: 0 }),
               dividendInfo: info,
               updatedAt: serverTimestamp()
             }, { merge: true });
@@ -1151,7 +1152,7 @@ function MainApp() {
             handleFirestoreError(e, OperationType.WRITE, `users/${user.uid}/stocks/${symbol}`);
           }
         } else {
-          setStocks(stocks.map(s => s.symbol === symbol ? { ...s, dividendInfo: info } : s));
+          setStocks(prev => prev.map(s => s.symbol === symbol ? { ...s, dividendInfo: info } : s));
         }
       }
     } catch (err: any) {
@@ -1288,10 +1289,10 @@ function MainApp() {
             if (user) {
               const stockRef = doc(db, 'users', user.uid, 'stocks', stock.symbol);
               try {
+                // 只更新股息資料，不可寫入 shares：全部更新要跑好幾十秒，期間買賣的股數會被舊資料蓋掉
                 await setDoc(stockRef, { 
                   symbol: stock.symbol,
                   name: stock.name || info.name || stock.symbol,
-                  shares: stock.shares ?? 0,
                   dividendInfo: info,
                   updatedAt: serverTimestamp()
                 }, { merge: true });
@@ -1348,10 +1349,10 @@ function MainApp() {
         if (user) {
           const stockRef = doc(db, 'users', user.uid, 'stocks', stock.symbol);
           try {
+            // 只更新股息資料，不可寫入 shares（同上）
             await setDoc(stockRef, { 
               symbol: stock.symbol,
               name: stock.name || info.name || stock.symbol,
-              shares: stock.shares ?? 0,
               dividendInfo: info,
               updatedAt: serverTimestamp()
             }, { merge: true });
