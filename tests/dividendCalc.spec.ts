@@ -115,3 +115,46 @@ describe('computeYearDividends（網頁的今年已領／未領）', () => {
     assert.deepEqual(yearsWithDividends(stocks), [2025, 2026]);
   });
 });
+
+import { listDividendEvents, addDays } from '../shared/dividendCalc';
+
+describe('listDividendEvents（首頁接下來、月曆）', () => {
+  const stocks = [
+    { symbol: '00795B', name: '中信美國公債20年', shares: 10000, dividendInfo: {
+      exDividendDate: '2026-11-17', paymentDate: '2026-12-11', amount: 0.315,
+      history: [{ date: '2026-08-18', paymentDate: '2026-09-10', amount: 0.32 }] } },
+    { symbol: '0056', name: '元大高股息', shares: 15000, dividendInfo: { history: [
+      { date: '2026-10-22', paymentDate: '2026-11-11', amount: 1.72 }] } },
+    { symbol: '2330', name: '台積電', shares: 0, dividendInfo: { history: [
+      { date: '2026-11-13', paymentDate: '2026-12-10', amount: 5 }] } },
+  ];
+  const snaps = [
+    { date: '2026-10-21', stocks: [{ symbol: '0056', shares: 15000 }, { symbol: '00795B', shares: 10000 }] },
+    { date: '2026-11-12', stocks: [{ symbol: '00795B', shares: 10000 }, { symbol: '2330', shares: 236 }] },
+  ];
+
+  test('最上層剛公告、還沒進 history 的配息也要列出', () => {
+    const ev = listDividendEvents({ stocks, snapshots: snaps, from: '2026-11-14', to: '2026-12-31' });
+    assert.deepEqual(ev.map(e => [e.date, e.type, e.symbol]), [
+      ['2026-11-17', 'ex-dividend', '00795B'],
+      ['2026-12-10', 'payment', '2330'],
+      ['2026-12-11', 'payment', '00795B'],
+    ]);
+  });
+
+  test('已賣光但除息前有持有：照樣列出領息，金額以除息前股數計算', () => {
+    const ev = listDividendEvents({ stocks, snapshots: snaps, from: '2026-12-10', to: '2026-12-10' });
+    assert.equal(ev[0].shares, 236);
+    assert.equal(ev[0].net, 236 * 5 - 10);
+  });
+
+  test('已清倉的股票不列除息提醒', () => {
+    const ev = listDividendEvents({ stocks, snapshots: snaps, from: '2026-11-13', to: '2026-11-13' });
+    assert.equal(ev.length, 0);
+  });
+
+  test('addDays', () => {
+    assert.equal(addDays('2026-12-30', 3), '2027-01-02');
+    assert.equal(addDays('2026-03-01', -1), '2026-02-28');
+  });
+});

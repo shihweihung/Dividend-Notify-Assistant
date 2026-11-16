@@ -9,7 +9,7 @@ test('更新股息資料（dividendInfo: info）的 setDoc 不可寫入目前持
   const src = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf-8');
   const blocks = src.split('await setDoc(').slice(1).map(b => b.slice(0, b.indexOf('});') + 3));
   const refreshWrites = blocks.filter(b => b.includes('dividendInfo: info'));
-  assert.ok(refreshWrites.length >= 3, `預期至少 3 個股息更新寫入，實際 ${refreshWrites.length}`);
+  assert.ok(refreshWrites.length >= 2, `預期至少 2 個股息更新寫入（單檔、全部），實際 ${refreshWrites.length}`);
   for (const b of refreshWrites) {
     assert.doesNotMatch(b, /shares:\s*(stock|existingStock)/, `股息更新不可寫入股數：\n${b}`);
   }

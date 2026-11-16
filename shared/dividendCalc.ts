@@ -51,34 +51,48 @@ export type DividendRecord = {
 
 /**
  * 取出一檔股票的所有現金股利紀錄（依除息日排序、同一除息日只留一筆）。
- * 有 history 用 history，沒有就用最新一次的 exDividendDate / paymentDate。
+ * 來源：history（或舊欄位 dividendHistory），再加上最上層最新一次的 exDividendDate / paymentDate
+ * （剛公告、還沒進 history 的配息只會出現在最上層）。
  */
 export function getDividendRecords(info: any, stock: any = {}): DividendRecord[] {
   if (!info) return [];
-  const raw: any[] = Array.isArray(info.history) && info.history.length > 0
+  const list: any[] = Array.isArray(info.history) && info.history.length > 0
     ? info.history
-    : [{
-        date: info.exDividendDate || stock?.exDividendDate,
-        paymentDate: info.paymentDate || stock?.paymentDate,
-        amount: info.amount,
-      }];
+    : Array.isArray(info.dividendHistory) ? info.dividendHistory : [];
+  const latest = {
+    date: info.exDividendDate || stock?.exDividendDate,
+    paymentDate: info.paymentDate || stock?.paymentDate,
+    amount: info.amount,
+  };
 
-  const seen = new Set<string>();
-  const records: DividendRecord[] = [];
-  for (const div of raw) {
-    if (!div) continue;
-    const exDate = normalizeDateStr(div.date);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(exDate) || seen.has(exDate)) continue;
-    seen.add(exDate);
-    let payDate = normalizeDateStr(div.paymentDate || div.payDate);
-    let payDateEstimated = false;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(payDate)) {
-      payDate = addOneMonth(exDate);
-      payDateEstimated = true;
+  const byExDate = new Map<string, DividendRecord>();
+  const add = (div: any, fillOnly: boolean) => {
+    if (!div) return;
+    const exDate = normalizeDateStr(div.date || div.exDividendDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(exDate)) return;
+    const rawPay = normalizeDateStr(div.paymentDate || div.payDate);
+    const hasPay = /^\d{4}-\d{2}-\d{2}$/.test(rawPay);
+    const existing = byExDate.get(exDate);
+    if (existing) {
+      // 同一除息日已經有紀錄：只補上缺少的發放日 / 金額
+      if (existing.payDateEstimated && hasPay) { existing.payDate = rawPay; existing.payDateEstimated = false; }
+      if (!existing.amount && Number(div.amount) > 0) existing.amount = Number(div.amount);
+      return;
     }
-    records.push({ exDate, payDate, payDateEstimated, amount: Number(div.amount) || 0 });
-  }
-  return records.sort((a, b) => a.exDate.localeCompare(b.exDate));
+    if (fillOnly && list.length > 0 && byExDate.size > 0 && exDate < [...byExDate.keys()].sort().slice(-1)[0]) {
+      // 最上層資料比 history 最新一筆還舊，視為過期資料，不加入
+      return;
+    }
+    byExDate.set(exDate, {
+      exDate,
+      payDate: hasPay ? rawPay : addOneMonth(exDate),
+      payDateEstimated: !hasPay,
+      amount: Number(div.amount) || 0,
+    });
+  };
+  for (const div of list) add(div, false);
+  add(latest, true);
+  return [...byExDate.values()].sort((a, b) => a.exDate.localeCompare(b.exDate));
 }
 
 // ---------------------------------------------------------------------------
@@ -306,4 +320,70 @@ export function yearsWithDividends(stocks: any[]): number[] {
     }
   }
   return [...years].filter((y) => y > 2000).sort((a, b) => a - b);
+}
+
+// ---------------------------------------------------------------------------
+// 除息 / 領息事件清單（首頁「接下來」、月曆、每檔股票的下一個事件都用這個）
+// ---------------------------------------------------------------------------
+
+export type DividendEventItem = {
+  date: string;            // 事件日期 YYYY-MM-DD
+  type: 'ex-dividend' | 'payment';
+  symbol: string;
+  name: string;
+  amountPerShare: number;
+  exDate: string;
+  payDate: string;
+  payDateEstimated: boolean;
+  shares: number;          // 能領的股數（除息日前一天）；除息事件為目前持股
+  sharesSource: SharesSource;
+  net: number;             // 預計入帳（已扣匯費）；除息事件為依目前持股估算的金額
+};
+
+/**
+ * 列出 [from, to] 期間的除息與領息事件（含頭尾），依日期排序。
+ * - 除息：只列目前還持有的股票，金額以目前股數估算
+ * - 領息：以除息日前一天的股數計算；當時沒持有就不列
+ */
+export function listDividendEvents(params: {
+  stocks: any[];
+  snapshots: HoldingSnapshot[];
+  from: string;
+  to: string;
+}): DividendEventItem[] {
+  const { stocks, snapshots, from, to } = params;
+  const events: DividendEventItem[] = [];
+  for (const stock of dedupeStocksBySymbol(stocks)) {
+    const symbol = stock.symbol;
+    const name = (stock.name && stock.name !== symbol) ? stock.name : (stock.dividendInfo?.name || symbol);
+    const currentShares = Number(stock.shares) || 0;
+    for (const rec of getDividendRecords(stock.dividendInfo, stock)) {
+      const amount = rec.amount || Number(stock.dividendInfo?.amount) || 0;
+      if (rec.exDate >= from && rec.exDate <= to && currentShares > 0) {
+        events.push({
+          date: rec.exDate, type: 'ex-dividend', symbol, name, amountPerShare: amount,
+          exDate: rec.exDate, payDate: rec.payDate, payDateEstimated: rec.payDateEstimated,
+          shares: currentShares, sharesSource: 'current', net: estimateNetPayment(amount, currentShares),
+        });
+      }
+      if (rec.payDate >= from && rec.payDate <= to && amount > 0) {
+        const { shares, source } = resolveSharesAtExDate(snapshots, symbol, rec.exDate, currentShares, stock.trades || []);
+        if (shares <= 0) continue;
+        events.push({
+          date: rec.payDate, type: 'payment', symbol, name, amountPerShare: amount,
+          exDate: rec.exDate, payDate: rec.payDate, payDateEstimated: rec.payDateEstimated,
+          shares, sharesSource: source, net: estimateNetPayment(amount, shares),
+        });
+      }
+    }
+  }
+  return events.sort((a, b) => a.date.localeCompare(b.date) || a.type.localeCompare(b.type) || b.net - a.net);
+}
+
+/** YYYY-MM-DD 加減天數 */
+export function addDays(dateStr: string, days: number): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalizeDateStr(dateStr));
+  if (!m) return '';
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + days));
+  return d.toISOString().slice(0, 10);
 }
