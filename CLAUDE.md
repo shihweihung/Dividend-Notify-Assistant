@@ -78,6 +78,8 @@
 - 賣出不改變平均成本;買進的平均成本含手續費重新加權
 - 只能復原「最後一筆」交易(用交易前存下的 prevShares / prevCost 還原),避免成本算錯
 - 舊的清倉資料(sellPrice / soldShares)沒有交易紀錄時才使用;沒填賣出股數就不算已實現損益,不可預設 1000 股
+- 記錄買賣與復原交易一律用 `runTransaction` 讀雲端最新的股數 / 交易紀錄再寫入,不可用畫面上的 stocks 直接 setDoc
+  (手機從背景切回來時畫面可能還是舊股數;切回前景超過 30 秒會用 `getDocsFromServer` 重抓持股,標題列顯示「同步中」)
 - 更新股息資料(重新整理、全部更新、開 App 自動更新)只能寫 dividendInfo / name,**不可寫入 shares**:
   全部更新要跑幾十秒,期間買賣的股數會被舊資料蓋掉(2026-11-16 實際發生),`tests/frontendGuards.spec.ts` 會檢查
 
