@@ -34,7 +34,7 @@ import {
 } from 'lucide-react';
 import { AIScreenshotModal } from './components/AIScreenshotModal';
 import { TradeModal } from './components/TradeModal';
-import { applyTrade, undoLastTrade, type TradeSide } from '../shared/trades';
+import { applyTrade, undoLastTrade, type Trade, type TradeSide } from '../shared/trades';
 import { 
   PieChart as RechartsPieChart, 
   Pie, 
@@ -99,7 +99,9 @@ import {
   query, 
   updateDoc,
   serverTimestamp,
-  getDoc
+  getDoc,
+  getDocsFromServer,
+  runTransaction
 } from 'firebase/firestore';
 
 function cn(...inputs: ClassValue[]) {
@@ -156,6 +158,8 @@ function MainApp() {
   const [stocks, setStocks] = useState<StockEntry[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  // 持股是否已跟雲端同步：loading = 第一次載入中；syncing = 從背景切回來重新抓；offline = 抓不到
+  const [syncStatus, setSyncStatus] = useState<'loading' | 'syncing' | 'synced' | 'offline'>('loading');
   const [newSymbol, setNewSymbol] = useState('');
   const [newShares, setNewShares] = useState<number>(0);
   const [newCost, setNewCost] = useState<number>(0);
@@ -356,6 +360,7 @@ function MainApp() {
         }));
         const { uniqueStocks, duplicatesToRemove, mergedSurvivingStocks } = deduplicateStocks(firestoreStocks);
         setStocks(uniqueStocks);
+        if (!snapshot.metadata.fromCache) setSyncStatus('synced');
 
         if (duplicatesToRemove.length > 0) {
           console.log(`[Deduplicate] Found ${duplicatesToRemove.length} duplicate stock docs, updating surviving stocks & cleaning up...`, duplicatesToRemove);
@@ -398,11 +403,13 @@ function MainApp() {
           }
         }
       }, (err) => {
+        setSyncStatus('offline');
         handleFirestoreError(err, OperationType.LIST, `users/${user.uid}/stocks`);
       });
 
       return () => unsubscribe();
     } else {
+      setSyncStatus('synced');
       const saved = safeStorage.getItem('taiwan_stocks');
       if (saved) {
         try {
@@ -425,6 +432,42 @@ function MainApp() {
       }
     }
   }, [user, isAuthReady]);
+
+  // 手機從背景切回來時，畫面會先停在上次的持股，Firestore 要過一陣子才重新連上。
+  // 切回前景（離開超過 30 秒）或恢復網路時，直接向伺服器重抓一次持股（只讀 stocks，約十幾筆）。
+  const refreshStocksFromServer = useCallback(async () => {
+    if (!user) return;
+    setSyncStatus(prev => (prev === 'loading' ? prev : 'syncing'));
+    try {
+      const snap = await getDocsFromServer(collection(db, 'users', user.uid, 'stocks'));
+      const { uniqueStocks } = deduplicateStocks(snap.docs.map(d => ({ ...(d.data() as StockEntry), _docId: d.id })));
+      setStocks(uniqueStocks);
+      setSyncStatus('synced');
+    } catch (err) {
+      console.warn('[Resume Sync] 無法從伺服器重新讀取持股:', err);
+      setSyncStatus('offline');
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    let hiddenAt = 0;
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+      if (hiddenAt && Date.now() - hiddenAt > 30_000) void refreshStocksFromServer();
+      hiddenAt = 0;
+    };
+    const onOnline = () => { void refreshStocksFromServer(); };
+    const onPageShow = (e: PageTransitionEvent) => { if (e.persisted) void refreshStocksFromServer(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('pageshow', onPageShow);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('pageshow', onPageShow);
+    };
+  }, [user, refreshStocksFromServer]);
 
   // Cash & Telegram Synced with Firestore or Local Storage
   useEffect(() => {
@@ -899,21 +942,29 @@ function MainApp() {
   // 記錄一筆買進 / 賣出：更新股數與平均成本，並把交易存進該股票的 trades 陣列
   const handleRecordTrade = async (symbol: string, input: { side: TradeSide; shares: number; price: number; tradeDate: string }) => {
     const cleanSym = normalizeSymbol(symbol);
-    const currentStock = stocks.find(s => normalizeSymbol(s.symbol) === cleanSym);
-    if (!currentStock) throw new Error('找不到這檔股票');
+    const localStock = stocks.find(s => normalizeSymbol(s.symbol) === cleanSym);
+    if (!localStock) throw new Error('找不到這檔股票');
     const now = new Date();
-    const { position, trade } = applyTrade(cleanSym, { shares: currentStock.shares, cost: currentStock.cost ?? null }, {
-      ...input,
-      id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
-      recordedAt: now.toISOString(),
-      recordedDate: format(now, 'yyyy-MM-dd'),
-    });
-    const trades = [...(currentStock.trades || []), trade];
-    const updateObj = { shares: position.shares, cost: position.cost, trades };
-    if (user) {
-      const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
-      await setDoc(stockRef, updateObj, { merge: true });
-    }
+    const build = (current: StockEntry) => {
+      const { position, trade } = applyTrade(cleanSym, { shares: current.shares, cost: current.cost ?? null }, {
+        ...input,
+        id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+        recordedAt: now.toISOString(),
+        recordedDate: format(now, 'yyyy-MM-dd'),
+      });
+      return { position, updateObj: { shares: position.shares, cost: position.cost, trades: [...(current.trades || []), trade] } };
+    };
+    // 登入時以雲端最新的股數計算（畫面上的可能還沒同步），用 transaction 讀寫同一份
+    const { position, updateObj } = user
+      ? await runTransaction(db, async (tx) => {
+          const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
+          const fresh = await tx.get(stockRef);
+          if (!fresh.exists()) throw new Error('找不到這檔股票');
+          const result = build(fresh.data() as StockEntry);
+          tx.set(stockRef, result.updateObj, { merge: true });
+          return result;
+        })
+      : build(localStock);
     setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, ...updateObj, cost: position.cost ?? undefined, symbol: cleanSym } : s));
   };
 
@@ -921,19 +972,39 @@ function MainApp() {
   const handleUndoLastTrade = async (symbol: string) => {
     const cleanSym = normalizeSymbol(symbol);
     const currentStock = stocks.find(s => normalizeSymbol(s.symbol) === cleanSym);
-    const undone = currentStock ? undoLastTrade(currentStock.trades || []) : null;
-    if (!undone) return;
+    const localTrades = currentStock?.trades || [];
+    if (!undoLastTrade(localTrades)) return;
     if (!window.confirm('確定要復原最後一筆交易嗎？股數與成本會回到交易前。')) return;
-    const updateObj = { shares: undone.position.shares, cost: undone.position.cost, trades: undone.trades };
+    const expectedLastId = localTrades[localTrades.length - 1]?.id;
+    const toUpdate = (trades: Trade[]) => {
+      const u = undoLastTrade(trades);
+      return u ? { undone: u, updateObj: { shares: u.position.shares, cost: u.position.cost, trades: u.trades } } : null;
+    };
+    let result = toUpdate(localTrades);
     if (user) {
       const stockRef = doc(db, 'users', user.uid, 'stocks', cleanSym);
       try {
-        await setDoc(stockRef, updateObj, { merge: true });
+        // 以雲端最新的交易紀錄為準；若最後一筆已經不是畫面上那筆（別的裝置剛記了一筆），就不復原
+        result = await runTransaction(db, async (tx) => {
+          const fresh = await tx.get(stockRef);
+          const trades = ((fresh.data() as StockEntry | undefined)?.trades || []) as Trade[];
+          if (trades[trades.length - 1]?.id !== expectedLastId) throw new Error('STALE_TRADES');
+          const r = toUpdate(trades);
+          if (r) tx.set(stockRef, r.updateObj, { merge: true });
+          return r;
+        });
       } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${cleanSym}`);
+        if (err instanceof Error && err.message === 'STALE_TRADES') {
+          setError('交易紀錄已在其他裝置變更，畫面已重新整理，請確認後再復原。');
+          void refreshStocksFromServer();
+        } else {
+          handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}/stocks/${cleanSym}`);
+        }
         return;
       }
     }
+    if (!result) return;
+    const { undone, updateObj } = result;
     setStocks(prev => prev.map(s => normalizeSymbol(s.symbol) === cleanSym ? { ...s, ...updateObj, cost: undone.position.cost ?? undefined, symbol: cleanSym } : s));
   };
 
@@ -1681,6 +1752,8 @@ function MainApp() {
         onAdd={() => setShowAddForm(true)}
         onSettings={() => setShowSettings(true)}
         darkMode={darkMode}
+        syncStatus={user ? syncStatus : 'synced'}
+        onRetrySync={() => { void refreshStocksFromServer(); }}
       >
         {error && !showAddForm && (
           <div className="mb-4 rounded-2xl bg-red-50 dark:bg-red-500/10 text-red-600 text-sm font-bold px-4 py-3 flex items-start justify-between gap-2">
@@ -1689,7 +1762,9 @@ function MainApp() {
           </div>
         )}
 
-        {uiTab === 'home' && (
+        {user && syncStatus === 'loading' && stocks.length === 0 ? (
+          <div className="text-center py-16 text-sm font-bold text-slate-400" role="status">正在讀取持股…</div>
+        ) : uiTab === 'home' && (
           <HomeView
             summary={currentYearSummary}
             upcoming={upcomingEvents}

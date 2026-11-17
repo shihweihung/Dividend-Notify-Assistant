@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { Camera, CalendarDays, Home, Layers, Plus, Settings, TrendingUp } from 'lucide-react';
+import { Camera, CalendarDays, CloudOff, Home, Layers, Plus, RefreshCw, Settings, TrendingUp } from 'lucide-react';
 import { cn } from '../components/utils';
 
 // 外框：頂部標題列 + 導覽（手機在底部、電腦在標題下方）
@@ -12,13 +12,17 @@ const TABS: { key: TabKey; label: string; icon: React.ElementType }[] = [
   { key: 'dividends', label: '股息', icon: CalendarDays },
 ];
 
-export function Shell({ tab, onTab, onImport, onAdd, onSettings, darkMode, children }: {
+export type SyncStatus = 'loading' | 'syncing' | 'synced' | 'offline';
+
+export function Shell({ tab, onTab, onImport, onAdd, onSettings, darkMode, syncStatus = 'synced', onRetrySync, children }: {
   tab: TabKey;
   onTab: (t: TabKey) => void;
   onImport: () => void;
   onAdd: () => void;
   onSettings: () => void;
   darkMode: boolean;
+  syncStatus?: SyncStatus;
+  onRetrySync?: () => void;
   children: React.ReactNode;
 }) {
   const iconBtn = 'w-11 h-11 flex items-center justify-center rounded-full text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800';
@@ -31,6 +35,16 @@ export function Shell({ tab, onTab, onImport, onAdd, onSettings, darkMode, child
             <h1 className="text-lg font-black text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5 select-none">
               <TrendingUp className="w-5 h-5" /> 息引力
             </h1>
+            {(syncStatus === 'loading' || syncStatus === 'syncing') && (
+              <span className="mr-auto ml-2 flex items-center gap-1 text-xs font-bold text-slate-400" role="status">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 同步中
+              </span>
+            )}
+            {syncStatus === 'offline' && (
+              <button onClick={onRetrySync} className="mr-auto ml-1 h-11 px-2 flex items-center gap-1 text-xs font-bold text-amber-600" title="點一下重新同步">
+                <CloudOff className="w-3.5 h-3.5" /> 未同步，點此重試
+              </button>
+            )}
             <div className="flex items-center gap-1">
               <button onClick={onImport} className={iconBtn} aria-label="截圖匯入" title="上傳券商截圖，AI 自動匯入持股"><Camera className="w-5 h-5" /></button>
               <button onClick={onAdd} className={iconBtn} aria-label="新增股票" title="新增股票"><Plus className="w-5 h-5" /></button>
