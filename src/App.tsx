@@ -31,7 +31,9 @@ import {
   Layers,
   Sparkles,
   Clock,
-  Camera
+  Camera,
+  List as ListIcon,
+  BarChart3
 } from 'lucide-react';
 import { AIScreenshotModal } from './components/AIScreenshotModal';
 import { PortfolioTrendChart } from './components/PortfolioTrendChart';
@@ -234,6 +236,16 @@ function MainApp() {
       return stock.shares > 0;
     });
   }, [stocks, stockFilterTab]);
+
+  // 手機版：清單一開始全部收合成一行，點開才看詳情（電腦版維持全部展開）
+  const mobileCollapseInitRef = React.useRef(false);
+  useEffect(() => {
+    if (mobileCollapseInitRef.current || stocks.length === 0) return;
+    mobileCollapseInitRef.current = true;
+    if (typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches) {
+      setCollapsedStockCards(new Set(stocks.map(s => s.symbol)));
+    }
+  }, [stocks]);
 
   const handleToggleAllCardsCollapse = useCallback(() => {
     setCollapsedStockCards(prev => {
@@ -2343,10 +2355,10 @@ function MainApp() {
           </div>
         </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-4 space-y-4">
-        {/* Tabs - Compact */}
+      <main className="max-w-4xl mx-auto px-4 pt-4 pb-[calc(5.5rem+env(safe-area-inset-bottom))] sm:py-4 space-y-4">
+        {/* 手機版：分頁改放在畫面底部（見檔案下方 MobileTabBar），這裡只在電腦版顯示 */}
         <div className={cn(
-          "flex p-1 rounded-xl transition-colors",
+          "hidden sm:flex p-1 rounded-xl transition-colors",
           darkMode ? "bg-slate-900/50" : "bg-slate-200/50"
         )}>
           <button
@@ -2655,15 +2667,24 @@ function MainApp() {
                       >
                         <div className="flex justify-between items-start">
                           <span className={cn(
-                            "text-[9px] sm:text-[10px] font-bold",
+                            "text-[13px] sm:text-[10px] font-bold",
                             isTodayDate 
-                              ? "bg-indigo-600 text-white w-4 h-4 flex items-center justify-center rounded-full" 
+                              ? "bg-indigo-600 text-white w-6 h-6 sm:w-4 sm:h-4 flex items-center justify-center rounded-full" 
                               : (darkMode ? "text-slate-500" : "text-slate-500")
                           )}>
                             {format(day, 'd')}
                           </span>
                         </div>
-                        <div className="mt-1 space-y-0.5 flex-1 flex flex-col justify-end">
+                        {/* 手機版：格子太小放不下股名，用圓點表示（橘＝除息、綠＝發放），點日期看當天明細 */}
+                        {dayEvents.length > 0 && (
+                          <div className="sm:hidden flex items-center justify-center gap-[3px] pb-1">
+                            {dayEvents.slice(0, 3).map((event, eIdx) => (
+                              <span key={eIdx} className={cn('w-[7px] h-[7px] rounded-full', event.type === 'ex-dividend' ? 'bg-orange-500' : 'bg-emerald-500')} />
+                            ))}
+                            {dayEvents.length > 3 && <span className="text-[9px] font-bold text-slate-400 leading-none">+{dayEvents.length - 3}</span>}
+                          </div>
+                        )}
+                        <div className="hidden sm:flex mt-1 space-y-0.5 flex-1 flex-col justify-end">
                           {dayEvents.map((event, eIdx) => (
                             <div 
                               key={eIdx}
@@ -3190,7 +3211,7 @@ function MainApp() {
                       </div>
                     </div>
 
-                    <div className="max-h-[580px] overflow-y-auto pr-1.5 space-y-3 custom-scrollbar">
+                    <div className="sm:max-h-[580px] sm:overflow-y-auto sm:pr-1.5 space-y-3 custom-scrollbar">
                       {groupedStockList.map((group) => {
                         const isGroupCollapsed = collapsedGroups.has(group.key);
 
@@ -4045,6 +4066,39 @@ function MainApp() {
         />
 
       </main>
+
+      {/* 手機版底部分頁列：拇指搆得到，切換時不必捲回頂端 */}
+      <nav
+        className={cn(
+          "sm:hidden fixed bottom-0 inset-x-0 z-40 border-t backdrop-blur",
+          darkMode ? "bg-slate-900/95 border-slate-800" : "bg-white/95 border-slate-200"
+        )}
+        style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
+      >
+        <div className="grid grid-cols-3">
+          {([
+            { key: 'calendar', label: '股息行事曆', Icon: CalendarIcon },
+            { key: 'list', label: `我的清單 (${stocks.length})`, Icon: ListIcon },
+            { key: 'history', label: '歷年股息', Icon: BarChart3 },
+          ] as const).map(({ key, label, Icon }) => {
+            const active = activeTab === key;
+            return (
+              <button
+                key={key}
+                onClick={() => { setActiveTab(key); window.scrollTo({ top: 0 }); }}
+                aria-current={active ? 'page' : undefined}
+                className={cn(
+                  "h-14 flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold",
+                  active ? (darkMode ? "text-indigo-400" : "text-indigo-600") : "text-slate-400"
+                )}
+              >
+                <Icon className="w-5 h-5" strokeWidth={active ? 2.5 : 2} />
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </nav>
       <style>{`
         .custom-scrollbar::-webkit-scrollbar {
           width: 4px;
