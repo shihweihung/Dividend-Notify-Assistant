@@ -145,3 +145,22 @@ describe('Telegram 記帳', () => {
     assert.match(sent.at(-1)!.body.text, /還沒有連結/);
   });
 });
+
+describe('Telegram 記帳：找帳號', () => {
+  test('同一個 Chat ID 有兩個帳號時，以網頁最近同步的 uid 為準', async () => {
+    store.set('users/u2', { telegramChatId: CHAT });
+    store.set('users/u2/stocks/3711', { symbol: '3711', name: '日月光投控', shares: 5000, cost: 150, trades: [] });
+    store.set(`telegram_chats/${CHAT}`, { uid: UID });
+    await handleTradeText('TOKEN', CHAT, '賣 日月光 200 178');
+    await press(lastButtons()[0]);
+    assert.equal(store.get(`users/${UID}/stocks/3711`).shares, 1000);
+    assert.equal(store.get('users/u2/stocks/3711').shares, 5000);
+  });
+
+  test('兩個帳號又沒有同步紀錄時不猜、不寫入', async () => {
+    store.set('users/u2', { telegramChatId: CHAT });
+    await handleTradeText('TOKEN', CHAT, '賣 日月光 200 178');
+    assert.match(sent.at(-1)!.body.text, /不只一個/);
+    assert.equal([...store.keys()].some(k => k.startsWith('pending_trades/')), false);
+  });
+});
