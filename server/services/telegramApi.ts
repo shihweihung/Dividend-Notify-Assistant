@@ -76,3 +76,40 @@ export async function sendSingleTelegramMsg(botToken: string, toChatId: number |
     console.error(`[Telegram Send Exception] ChatID ${toChatId}:`, err instanceof Error ? err.stack : err);
   }
 }
+
+// 帶按鈕的訊息（記帳確認卡用）；純文字，不用 Markdown 以免股名特殊字元出錯
+export async function sendTelegramButtons(
+  botToken: string,
+  chatId: number | string,
+  text: string,
+  buttons: { text: string; data: string }[],
+) {
+  return telegramCall(botToken, "sendMessage", {
+    chat_id: chatId,
+    text,
+    reply_markup: { inline_keyboard: [buttons.map(b => ({ text: b.text, callback_data: b.data }))] },
+  });
+}
+
+export async function editTelegramMessage(botToken: string, chatId: number | string, messageId: number, text: string) {
+  return telegramCall(botToken, "editMessageText", { chat_id: chatId, message_id: messageId, text });
+}
+
+export async function answerCallbackQuery(botToken: string, callbackQueryId: string, text?: string) {
+  return telegramCall(botToken, "answerCallbackQuery", { callback_query_id: callbackQueryId, ...(text ? { text } : {}) });
+}
+
+async function telegramCall(botToken: string, method: string, body: any) {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) console.warn(`[Telegram ${method}] status ${res.status}: ${await res.text()}`);
+    return res;
+  } catch (err) {
+    console.error(`[Telegram ${method}] failed:`, err);
+    return null;
+  }
+}

@@ -82,6 +82,12 @@
 - 更新股息資料(重新整理、全部更新、開 App 自動更新)只能寫 dividendInfo / name,**不可寫入 shares**:
   全部更新要跑幾十秒,期間買賣的股數會被舊資料蓋掉(2026-11-16 實際發生),`tests/frontendGuards.spec.ts` 會檢查
 
+## Telegram 記帳
+- 使用者在 Telegram 傳「買 2330 1000 1050」「賣 日月光 200 178」「復原 日月光」,傳「記帳」看格式
+- 解析在 `server/lib/tradeCommand.ts`(純規則，不用 Gemini、不花錢),流程在 `server/services/telegramTrades.ts`
+- 一定先回確認卡(存在 `pending_trades`,15 分鐘有效),按「確認」才在 transaction 內用最新股數寫入;對到多檔股票時不猜
+- 測試在 `tests/tradeCommand.spec.ts`、`tests/telegramTrades.spec.ts`
+
 ## 開啟速度
 - Firestore 用 `persistentLocalCache`(IndexedDB):打開 App 先顯示本機快取，再跟雲端同步(`syncStatus`)
 - 因此 `syncStatus !== 'synced'` 時不可做任何寫入(今日快照、去重、送 Telegram bot 的持股),以免把快取的舊股數寫回雲端

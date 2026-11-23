@@ -5,6 +5,7 @@ import { ctx } from "../context";
 import { firebaseAuth } from "../middleware/auth";
 import { getChatFromFirestore, saveChatToFirestore } from "../services/chatStore";
 import { processTelegramMessage } from "../services/telegramBot";
+import { handleTradeCallback } from "../services/telegramTrades";
 
 export const router = express.Router();
 
@@ -81,7 +82,17 @@ router.post("/api/telegram/webhook", async (req, res) => {
     if (req.headers['x-telegram-bot-api-secret-token'] !== process.env.API_SECRET_KEY) {
       return res.sendStatus(403);
     }
-    const { message, edited_message } = req.body;
+    const { message, edited_message, callback_query } = req.body;
+
+    // 記帳確認卡的按鈕
+    if (callback_query?.message?.chat?.id) {
+      const cqChatId = String(callback_query.message.chat.id);
+      const cqChat = await getChatFromFirestore(cqChatId);
+      const cqToken = cqChat?.botToken || process.env.TELEGRAM_BOT_TOKEN;
+      if (cqToken) await handleTradeCallback(cqToken, callback_query);
+      return res.sendStatus(200);
+    }
+
     const msg = message || edited_message;
     if (!msg || !msg.chat || !msg.chat.id) {
       return res.sendStatus(200);
@@ -149,7 +160,7 @@ router.post("/api/telegram/register-webhook", firebaseAuth, async (req, res) => 
     } else {
       // Prod / Shared link: Register a public webhook url
       const webhookUrl = `${baseUrl.replace(/\/$/, "")}/api/telegram/webhook`;
-      const setUrl = `https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}&secret_token=${process.env.API_SECRET_KEY}`;
+      const setUrl = `https://api.telegram.org/bot${botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}&secret_token=${process.env.API_SECRET_KEY}&allowed_updates=${encodeURIComponent(JSON.stringify(["message", "edited_message", "callback_query"]))}`;
       const setRes = await fetch(setUrl);
       const setData: any = await setRes.json();
       

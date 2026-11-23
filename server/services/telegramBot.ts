@@ -4,6 +4,7 @@ import { fetchStockDataFromTwse } from "../../src/services/twseService";
 import { sendTelegramMsg } from "./telegramApi";
 import { getChatFromFirestore } from "./chatStore";
 import { parsePortfolioScreenshotWithGemini } from "./screenshotParser";
+import { handleTradeText, TRADE_HELP } from "./telegramTrades";
 
 // Helper: Process Telegram Message (shared by Webhook and Polling)
 export async function processTelegramMessage(botToken: string, msg: any) {
@@ -85,6 +86,13 @@ export async function processTelegramMessage(botToken: string, msg: any) {
   const username = msg.from?.first_name || msg.from?.username || msg.from?.last_name || "投資大師";
 
   console.log(`[Telegram Bot] Processing message from ChatID ${chatId}: "${text}"`);
+
+  // 記帳：「買 2330 1000 1050」「賣 日月光 200 178」「復原 日月光」→ 確認卡，不交給 Gemini
+  if (text === "記帳" || text === "/trade" || text === "記帳說明") {
+    await sendTelegramMsg(botToken, chatId, TRADE_HELP);
+    return;
+  }
+  if (text && await handleTradeText(botToken, chatId, text)) return;
 
   let stocks: any[] = [];
   let cash = 0;
@@ -224,6 +232,7 @@ export async function processTelegramMessage(botToken: string, msg: any) {
       `💰 *「我現在有多少閒置現金？」*\n` +
       `📈 *「分析我的持股持倉」*\n` +
       `🎯 *「如何做好我的動態資產平衡？」*\n\n` +
+      `📝 也可以直接記買賣，例如「買 2330 1000 1050」「賣 日月光 200 178」，傳「記帳」看完整格式。\n\n` +
       `直接在下方輸入區輸入您的問題，隨時看子彈到位、聽策略叮嚀！👇`;
     await sendTelegramMsg(botToken, chatId, welcomeText);
     return;
