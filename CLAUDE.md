@@ -85,6 +85,8 @@
 ## Telegram 記帳
 - 使用者在 Telegram 傳「買 2330 1000 1050」「賣 日月光 200 178」「復原 日月光」,傳「記帳」看格式
 - 解析在 `server/lib/tradeCommand.ts`(純規則，不用 Gemini、不花錢),流程在 `server/services/telegramTrades.ts`
+- 口語(「今天把日月光賣了兩張，價格 178」):`looksLikeTradeIntent` 粗篩後才呼叫 Gemini Flash-Lite(`server/services/tradeExtractor.ts`)
+  只抽欄位，股票對應、股數、日期驗證仍走 `buildTradeFromExtraction` 同一套規則;沒說價格不可猜，要求使用者補
 - 一定先回確認卡(存在 `pending_trades`,15 分鐘有效),按「確認」才在 transaction 內用最新股數寫入;對到多檔股票時不猜
 - 測試在 `tests/tradeCommand.spec.ts`、`tests/telegramTrades.spec.ts`
 
