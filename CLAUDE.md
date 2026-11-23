@@ -82,6 +82,11 @@
 - 更新股息資料(重新整理、全部更新、開 App 自動更新)只能寫 dividendInfo / name,**不可寫入 shares**:
   全部更新要跑幾十秒,期間買賣的股數會被舊資料蓋掉(2026-11-16 實際發生),`tests/frontendGuards.spec.ts` 會檢查
 
+## 開啟速度
+- Firestore 用 `persistentLocalCache`(IndexedDB):打開 App 先顯示本機快取，再跟雲端同步(`syncStatus`)
+- 因此 `syncStatus !== 'synced'` 時不可做任何寫入(今日快照、去重、送 Telegram bot 的持股),以免把快取的舊股數寫回雲端
+- server 對回應做 gzip,`/assets` 帶 hash 的檔案快取一年;index.html 不快取
+
 ## 使用情境(做取捨時的依據)
 - 使用者只有本人與少數家人,不需要為大量使用者設計
 - 優先順序:股息股數正確 > 花費最低 > 使用方便 > 效能

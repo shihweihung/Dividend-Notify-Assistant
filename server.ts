@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 dotenv.config({ override: true });
 import http from "http";
 import express from "express";
+import compression from "compression";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { initFirestoreClient, checkFirestoreHealth } from "./server/context";
@@ -21,6 +22,7 @@ const __dirname = process.cwd();
 
 async function startServer() {
   const app = express();
+  app.use(compression());
   const httpServer = http.createServer(app);
   const PORT = 3000;
 
@@ -54,6 +56,8 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(__dirname, 'dist');
+    // 檔名帶 hash 的 JS/CSS 內容不會變，讓手機快取一年；index.html 仍每次檢查新版
+    app.use('/assets', express.static(path.join(distPath, 'assets'), { immutable: true, maxAge: '365d' }));
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

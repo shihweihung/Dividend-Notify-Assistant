@@ -327,6 +327,8 @@ function MainApp() {
   // Automatically record/update snapshot for today whenever stocks or cash are updated
   useEffect(() => {
     if (!isAuthReady || !user || !stocks || stocks.length === 0) return;
+    // 畫面上可能還是本機快取的舊持股，跟雲端同步完成前不可寫快照（快照決定除息日的股數）
+    if (syncStatus !== 'synced') return;
 
     const todayStr = format(new Date(), 'yyyy-MM-dd');
 
@@ -362,7 +364,7 @@ function MainApp() {
     }, 1500);
 
     return () => clearTimeout(timer);
-  }, [user, isAuthReady, stocks, cash]);
+  }, [user, isAuthReady, stocks, cash, syncStatus]);
 
   // Helper to get exact shares held on or before a given ex-dividend date (exDateStr: YYYY-MM-DD)
   // 除息日前一天的持股（與 Telegram 通知共用 shared/dividendCalc.ts 的規則）
@@ -460,7 +462,8 @@ function MainApp() {
         setStocks(uniqueStocks);
         if (!snapshot.metadata.fromCache) setSyncStatus('synced');
 
-        if (duplicatesToRemove.length > 0) {
+        // 本機快取的資料可能不是最新，只在拿到雲端資料時才做去重寫入
+        if (duplicatesToRemove.length > 0 && !snapshot.metadata.fromCache) {
           console.log(`[Deduplicate] Found ${duplicatesToRemove.length} duplicate stock docs, updating surviving stocks & cleaning up...`, duplicatesToRemove);
           
           let allMergedSavedSuccessfully = true;
@@ -615,6 +618,7 @@ function MainApp() {
   // Synchronize Telegram Chat Data with server JSON Database
   useEffect(() => {
     if (!user || !telegramChatId || !telegramBotToken) return;
+    if (syncStatus !== 'synced') return; // 不把本機快取的舊持股送給 Telegram bot
 
     const syncChatData = async () => {
       try {
@@ -636,7 +640,7 @@ function MainApp() {
 
     const timer = setTimeout(syncChatData, 1200);
     return () => clearTimeout(timer);
-  }, [telegramChatId, telegramBotToken, cash, stocks, user]);
+  }, [telegramChatId, telegramBotToken, cash, stocks, user, syncStatus]);
 
   // Auto-Register Telegram Webhook in background to ensure it always points to the active dev/prod domain
   useEffect(() => {
