@@ -28,6 +28,11 @@ async function pollBotUpdates(botToken: string) {
     if (data.ok && data.result && data.result.length > 0) {
       for (const update of data.result) {
         botOffsets[botToken] = update.update_id + 1;
+        if (update.callback_query) {
+          const { handleTradeCallback } = await import("./telegramTrades");
+          await handleTradeCallback(botToken, update.callback_query);
+          continue;
+        }
         const msg = update.message || update.edited_message;
         if (msg) {
           await processTelegramMessage(botToken, msg);
