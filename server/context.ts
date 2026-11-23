@@ -53,21 +53,30 @@ export async function checkFirestoreHealth(timeoutMs = 2500) {
     ctx.firestoreAvailable = false;
     return false;
   }
+  // Cloud Run 冷啟動時第一次查詢要建連線、拿憑證，常常超過幾秒。
+  // 逾時只代表「還不知道」，不可把 Firestore 標成不能用（之前會導致整個執行個體都當作資料庫連不上）。
+  // 查詢本身繼續跑：成功就標 true，真的出錯（權限、找不到資料庫）才標 false。
+  const query = ctx.adminDb.collection("telegram_chats").limit(1).get().then(
+    () => {
+      ctx.firestoreAvailable = true;
+      console.log("[Firestore] Health check passed");
+      return true;
+    },
+    (err: any) => {
+      ctx.firestoreAvailable = false;
+      console.warn("[Firestore] Not accessible in this environment. Some features will be disabled.", err?.message || err);
+      return false;
+    },
+  );
   let timeoutId: NodeJS.Timeout | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timeoutId = setTimeout(() => {
+      console.warn(`[Firestore] Health check still pending after ${timeoutMs}ms; will update when it finishes`);
+      resolve(false);
+    }, timeoutMs);
+  });
   try {
-    await Promise.race([
-      ctx.adminDb.collection("telegram_chats").limit(1).get(),
-      new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error(`Firestore health check timed out after ${timeoutMs}ms`)), timeoutMs);
-      }),
-    ]);
-    ctx.firestoreAvailable = true;
-    console.log("[Firestore] Health check passed");
-    return true;
-  } catch (hcErr: any) {
-    ctx.firestoreAvailable = false;
-    console.warn("[Firestore] Not accessible in this environment. Some features will be disabled.", hcErr.message || hcErr);
-    return false;
+    return await Promise.race([query, timeout]);
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
