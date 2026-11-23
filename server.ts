@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 dotenv.config({ override: true });
 import http from "http";
 import express from "express";
+import compression from "compression";
 import path from "path";
 
 // 純函式另外匯出，方便測試與既有 import 相容
@@ -12,6 +13,7 @@ const __dirname = process.cwd();
 
 async function startServer() {
   const app = express();
+  app.use(compression()); // JS 約 1.4MB → 400KB
   const httpServer = http.createServer(app);
   const PORT = 3000;
 
@@ -74,6 +76,8 @@ async function startServer() {
       } else {
         const staticRouter = express.Router();
         const distPath = path.join(__dirname, "dist");
+        // 檔名帶 hash 的 JS/CSS 內容不會變，讓手機快取一年；index.html 仍每次檢查新版
+        staticRouter.use("/assets", express.static(path.join(distPath, "assets"), { immutable: true, maxAge: "365d" }));
         staticRouter.use(express.static(distPath));
         staticRouter.get("*", (req, res) => {
           res.sendFile(path.join(distPath, "index.html"));
