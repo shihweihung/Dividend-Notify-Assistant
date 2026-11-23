@@ -25,6 +25,7 @@ router.post("/api/telegram/save-chat-data", firebaseAuth, async (req, res) => {
       stocks: stocks !== undefined ? stocks : (existing.stocks || []),
       username: username || existing.username || "投資大師",
       isWebhookMode: existing.isWebhookMode || false,
+      uid: (req as any).user?.uid || existing.uid || null, // 記帳時用來找是哪個帳號（同一個 Chat ID 可能被多個帳號填過）
       baseUrl: existing.baseUrl || "",
     };
 

@@ -12,9 +12,19 @@ const PENDING_TTL_MS = 15 * 60 * 1000; // 確認卡 15 分鐘內有效
 const today = () => moment().tz("Asia/Taipei").format("YYYY-MM-DD");
 const money = (n: number) => Math.round(n).toLocaleString("en-US");
 
-async function findUserByChatId(chatId: string): Promise<string | null> {
-  const snap = await ctx.adminDb.collection("users").where("telegramChatId", "==", chatId).limit(1).get();
-  return snap.empty ? null : snap.docs[0].id;
+/**
+ * 找出這個 Telegram 聊天室對應的帳號。
+ * 先看網頁最近一次同步時記下的 uid（telegram_chats/{chatId}.uid）；沒有才查 users.telegramChatId。
+ * 查到多個帳號時不猜，回傳 "ambiguous"，避免把交易記到別人（例如家人）的帳號。
+ */
+async function findUserByChatId(chatId: string): Promise<string | null | "ambiguous"> {
+  const chat = await ctx.adminDb.collection("telegram_chats").doc(chatId).get();
+  const mapped = chat.exists ? chat.data()?.uid : null;
+  const snap = await ctx.adminDb.collection("users").where("telegramChatId", "==", chatId).limit(5).get();
+  const uids: string[] = snap.docs.map((d: any) => d.id);
+  if (mapped && (uids.length === 0 || uids.includes(mapped))) return mapped;
+  if (uids.length === 1) return uids[0];
+  return uids.length > 1 ? "ambiguous" : null;
 }
 
 async function loadHeld(uid: string): Promise<(HeldStock & { docId: string; cost: number | null; trades: Trade[] })[]> {
@@ -50,6 +60,10 @@ export async function handleTradeText(botToken: string, chatIdRaw: number | stri
 
   try {
     const uid = await findUserByChatId(chatId);
+    if (uid === "ambiguous") {
+      await sendTelegramMsg(botToken, chatId, "這個 Telegram 帳號連結了不只一個息引力帳號，請先用要記帳的帳號打開一次息引力網頁，再傳一次。這筆沒有記錄。");
+      return true;
+    }
     if (!uid) {
       await sendTelegramMsg(botToken, chatId, `還沒有連結息引力帳號。請到網頁的通知設定填入 Chat ID：${chatId}`);
       return true;
