@@ -90,3 +90,38 @@ describe('parseTradeCommand', () => {
     assert.equal((parseTradeCommand('復原', TODAY, HELD) as any).kind, 'error');
   });
 });
+
+import { looksLikeTradeIntent, buildTradeFromExtraction } from '../server/lib/tradeCommand';
+
+describe('口語記帳', () => {
+  test('像在講買賣才問 Gemini；問問題、閒聊不問', () => {
+    assert.equal(looksLikeTradeIntent('今天把日月光賣了兩張，價格178'), true);
+    assert.equal(looksLikeTradeIntent('剛剛加碼 0056 一張 36.5'), true);
+    assert.equal(looksLikeTradeIntent('台積電可以買嗎？'), false);
+    assert.equal(looksLikeTradeIntent('分析我的持股'), false);
+    assert.equal(looksLikeTradeIntent('我想賣日月光'), false); // 沒有數量
+  });
+
+  test('張換成股、全部賣掉用目前持股', () => {
+    const a = buildTradeFromExtraction({ side: 'sell', stock: '日月光', lots: 2, price: 178 }, TODAY, HELD) as any;
+    assert.equal(a.trade.shares, 2000);
+    const b = buildTradeFromExtraction({ side: 'sell', stock: '日月光', sellAll: true, price: 178 }, TODAY, HELD) as any;
+    assert.equal(b.trade.shares, 1200);
+  });
+
+  test('沒說價格不可猜，要求補上', () => {
+    const r = buildTradeFromExtraction({ side: 'buy', stock: '台積電', shares: 1000, price: null }, TODAY, HELD) as any;
+    assert.equal(r.ok, false);
+    assert.match(r.message, /成交價/);
+  });
+
+  test('日期用同一套規則；未來日期擋掉', () => {
+    assert.equal((buildTradeFromExtraction({ side: 'buy', stock: '2330', shares: 10, price: 1000, date: '昨天' }, TODAY, HELD) as any).trade.tradeDate, '2026-11-22');
+    assert.equal((buildTradeFromExtraction({ side: 'buy', stock: '2330', shares: 10, price: 1000, date: '2026-12-01' }, TODAY, HELD) as any).ok, false);
+  });
+
+  test('股名對到多檔一樣不猜', () => {
+    const r = buildTradeFromExtraction({ side: 'buy', stock: '元大', shares: 1000, price: 30 }, TODAY, HELD) as any;
+    assert.equal(r.ok, false);
+  });
+});

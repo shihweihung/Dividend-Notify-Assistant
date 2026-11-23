@@ -177,3 +177,71 @@ export function parseTradeCommand(rawText: string, today: string, held: HeldStoc
 
   return { kind: 'trade', side, symbol: found.symbol, name: found.name, shares, price, tradeDate, isNewStock: !found.held };
 }
+
+// ---------------------------------------------------------------------------
+// 口語記帳：「今天把日月光賣了兩張，價格 178」這種句子先交給 Gemini 抽出欄位，
+// 再用下面的函式驗證、對股票（與固定格式走同一套規則，確認卡也一樣）。
+// ---------------------------------------------------------------------------
+
+const INTENT_WORDS = ['買', '賣', '加碼', '減碼', '出清', '清掉', '清倉', '入手', '進場', '出場', '停損', '停利', '獲利了結', '砍', '補登'];
+
+/** 粗篩：像是在講買賣才花錢問 Gemini，一般聊天不會多一次呼叫 */
+export function looksLikeTradeIntent(text: string): boolean {
+  const t = (text || '').trim();
+  if (!t || t.length > 200) return false;
+  if (/[?？]$/.test(t) || /(要不要|該不該|可以買嗎|值得|建議|分析|看法|怎麼看)/.test(t)) return false; // 問問題，不是記帳
+  const hasWord = INTENT_WORDS.some(w => t.includes(w));
+  const hasQty = /\d|[一二兩三四五六七八九十百千半]+\s*[張股]|全部|全賣|都賣/.test(t);
+  return hasWord && hasQty;
+}
+
+/** Gemini 抽出來的一筆（欄位都可能缺） */
+export type ExtractedTrade = {
+  side?: string | null;
+  stock?: string | null;
+  shares?: number | null;
+  lots?: number | null;
+  sellAll?: boolean | null;
+  price?: number | null;
+  date?: string | null;
+};
+
+export type BuiltTrade = { ok: true; trade: ParsedTrade } | { ok: false; message: string };
+
+export function buildTradeFromExtraction(item: ExtractedTrade, today: string, held: HeldStock[]): BuiltTrade {
+  const side = item.side === 'buy' || item.side === 'sell' ? item.side : null;
+  const stockText = (item.stock || '').trim();
+  const label = stockText || '這筆';
+  if (!side) return { ok: false, message: `${label}：看不出是買進還是賣出` };
+  if (!stockText) return { ok: false, message: '看不出是哪一檔股票' };
+
+  const found = resolveStock(stockText, held);
+  if ('error' in found) return { ok: false, message: found.error };
+  if (side === 'sell' && !found.held) return { ok: false, message: `你沒有持有 ${found.name}，不能賣出` };
+
+  let shares: number | null = null;
+  if (item.lots !== null && item.lots !== undefined && Number(item.lots) > 0) shares = Math.round(Number(item.lots) * 1000);
+  else if (item.shares !== null && item.shares !== undefined && Number(item.shares) > 0) shares = Number(item.shares);
+  else if (item.sellAll && side === 'sell') {
+    shares = Number(held.find(s => s.symbol === found.symbol)?.shares) || 0;
+    if (shares <= 0) return { ok: false, message: `${found.name} 目前沒有持股` };
+  }
+  if (shares === null) return { ok: false, message: `${found.name}：沒有說股數（例如 200 股、2 張）` };
+  if (!Number.isInteger(shares) || shares <= 0) return { ok: false, message: `${found.name}：股數必須是正整數` };
+
+  const price = item.price !== null && item.price !== undefined ? Number(item.price) : NaN;
+  if (!(price > 0)) return { ok: false, message: `${found.name}：沒有說成交價，請補上價格再傳一次` };
+
+  let tradeDate = today;
+  if (item.date) {
+    const d = parseDateToken(String(item.date).trim(), today);
+    if (!d || !isValidDate(d)) return { ok: false, message: `${found.name}：看不懂日期「${item.date}」` };
+    tradeDate = d;
+  }
+  if (tradeDate > today) return { ok: false, message: `${found.name}：成交日不能晚於今天` };
+
+  return {
+    ok: true,
+    trade: { kind: 'trade', side, symbol: found.symbol, name: found.name, shares, price, tradeDate, isNewStock: !found.held },
+  };
+}

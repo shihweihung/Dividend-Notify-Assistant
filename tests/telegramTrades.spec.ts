@@ -164,3 +164,36 @@ describe('Telegram 記帳：找帳號', () => {
     assert.equal([...store.keys()].some(k => k.startsWith('pending_trades/')), false);
   });
 });
+
+import { __setTradeExtractor } from '../server/services/telegramTrades';
+
+describe('Telegram 口語記帳', () => {
+  test('口語句子 → Gemini 抽欄位 → 一樣先出確認卡，按確認才寫入', async () => {
+    __setTradeExtractor(async () => ({ isTrade: true, trades: [{ side: 'sell', stock: '日月光', lots: null, shares: 200, price: 178 }] }));
+    assert.equal(await handleTradeText('TOKEN', CHAT, '今天把日月光賣了200股，178'), true);
+    assert.equal(store.get(`users/${UID}/stocks/3711`).shares, 1200);
+    await press(lastButtons()[0]);
+    assert.equal(store.get(`users/${UID}/stocks/3711`).shares, 1000);
+  });
+
+  test('一句話兩筆 → 兩張確認卡', async () => {
+    __setTradeExtractor(async () => ({ isTrade: true, trades: [
+      { side: 'sell', stock: '日月光', shares: 200, price: 178 },
+      { side: 'buy', stock: '2330', lots: 1, price: 1050 },
+    ] }));
+    await handleTradeText('TOKEN', CHAT, '賣了日月光200股178，買了台積電一張1050');
+    assert.equal(sent.filter(s => s.body.reply_markup).length, 2);
+  });
+
+  test('Gemini 判斷不是記帳 → 交給一般聊天', async () => {
+    __setTradeExtractor(async () => ({ isTrade: false, trades: [] }));
+    assert.equal(await handleTradeText('TOKEN', CHAT, '如果我賣兩張日月光會怎樣'), false);
+  });
+
+  test('缺價格 → 不出確認卡，請使用者補', async () => {
+    __setTradeExtractor(async () => ({ isTrade: true, trades: [{ side: 'buy', stock: '台積電', shares: 1000, price: null }] }));
+    await handleTradeText('TOKEN', CHAT, '今天買了台積電1000股');
+    assert.equal(sent.some(s => s.body.reply_markup), false);
+    assert.match(sent.at(-1)!.body.text, /成交價/);
+  });
+});

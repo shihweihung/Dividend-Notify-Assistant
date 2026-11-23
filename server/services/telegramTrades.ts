@@ -4,7 +4,12 @@
 
 import moment from "moment-timezone";
 import { ctx, logFirestoreError } from "../context";
-import { parseTradeCommand, TRADE_HELP, type HeldStock, type ParsedTrade } from "../lib/tradeCommand";
+import { parseTradeCommand, looksLikeTradeIntent, buildTradeFromExtraction, TRADE_HELP, type HeldStock, type ParsedTrade } from "../lib/tradeCommand";
+import { extractTradesWithGemini } from "./tradeExtractor";
+
+// 測試時可替換成假的 Gemini
+let extract = extractTradesWithGemini;
+export function __setTradeExtractor(fn: typeof extractTradesWithGemini) { extract = fn; }
 import { applyTrade, undoLastTrade, sortTrades, TradeError, type Trade } from "../../shared/trades";
 import { sendTelegramMsg, sendTelegramButtons, editTelegramMessage, answerCallbackQuery } from "./telegramApi";
 
@@ -49,8 +54,10 @@ function tradeId() {
 /** 處理文字訊息；是記帳指令就回 true（呼叫端不要再丟給 Gemini 聊天） */
 export async function handleTradeText(botToken: string, chatIdRaw: number | string, text: string): Promise<boolean> {
   const t = today();
-  // 先用空持股判斷是不是記帳指令，不是就不查資料庫
-  if (parseTradeCommand(text, t, []) === null) return false;
+  // 先判斷是不是記帳：固定格式（免費）或口語（才問 Gemini）。都不像就交給聊天，不查資料庫
+  const isCommand = parseTradeCommand(text, t, []) !== null;
+  const isSpoken = !isCommand && looksLikeTradeIntent(text);
+  if (!isCommand && !isSpoken) return false;
   const chatId = String(chatIdRaw);
 
   if (!ctx.adminDb || ctx.firestoreAvailable === false) {
@@ -65,11 +72,34 @@ export async function handleTradeText(botToken: string, chatIdRaw: number | stri
       return true;
     }
     if (!uid) {
+      if (isSpoken) return false; // 口語句子又沒連結帳號，交給一般聊天
       await sendTelegramMsg(botToken, chatId, `還沒有連結息引力帳號。請到網頁的通知設定填入 Chat ID：${chatId}`);
       return true;
     }
     const held = await loadHeld(uid);
-    const parsed = parseTradeCommand(text, t, held);
+
+    // 開頭是「買/賣」但固定格式看不懂（例如「賣了日月光200股178，買了台積電一張」），改用口語解析
+    let parsed = isSpoken ? null : parseTradeCommand(text, t, held);
+    const useSpoken = isSpoken || (parsed?.kind === "error" && looksLikeTradeIntent(text));
+
+    if (useSpoken) {
+      let ex;
+      try {
+        ex = await extract(text, t, held.filter(s => (s.shares || 0) > 0).map(s => s.name || s.symbol));
+      } catch (err) {
+        console.warn("[Telegram Trade] 口語解析失敗", err);
+        await sendTelegramMsg(botToken, chatId, `看不太懂這筆，請用這個格式再傳一次（這筆沒有記錄）：\n\n${TRADE_HELP}`);
+        return true;
+      }
+      if (!ex.isTrade || ex.trades.length === 0) return false; // 不是在記帳，交給一般聊天
+      for (const item of ex.trades.slice(0, 5)) {
+        const built = buildTradeFromExtraction(item, t, held);
+        if ('trade' in built) await proposeTrade(botToken, chatId, uid, held, built.trade, t);
+        else await sendTelegramMsg(botToken, chatId, `⚠️ ${built.message}（這筆沒有記錄）\n\n也可以用格式：買 2330 1000 1050`);
+      }
+      return true;
+    }
+
     if (!parsed) return false;
     if (parsed.kind === "error") {
       await sendTelegramMsg(botToken, chatId, parsed.message);
@@ -98,46 +128,55 @@ export async function handleTradeText(botToken: string, chatIdRaw: number | stri
       return true;
     }
 
-    // 預覽：用目前股數算一次，讓使用者看到費用與交易後股數
-    const stock = held.find(s => s.symbol === parsed.symbol);
-    const position = { shares: stock?.shares || 0, cost: stock?.cost ?? null };
-    let preview;
-    try {
-      preview = applyTrade(parsed.symbol, position, {
-        side: parsed.side, shares: parsed.shares, price: parsed.price, tradeDate: parsed.tradeDate,
-        recordedAt: new Date().toISOString(), recordedDate: t, id: "preview",
-      });
-    } catch (err) {
-      await sendTelegramMsg(botToken, chatId, err instanceof TradeError ? `⚠️ ${err.message}` : "⚠️ 無法計算這筆交易");
-      return true;
-    }
-
-    await pendingRef.set({
-      uid, chatId, kind: "trade", docId: stock?.docId || parsed.symbol, trade: parsed, createdAt: Date.now(),
-    });
-
-    const sideText = parsed.side === "buy" ? "買進" : "賣出";
-    const amount = Math.floor(parsed.shares * parsed.price + 1e-6);
-    const fees = preview.trade.side === "sell"
-      ? `手續費 ${money(preview.trade.fee)} 元、證交稅 ${money(preview.trade.tax)} 元`
-      : `手續費 ${money(preview.trade.fee)} 元`;
-    const card =
-      `📝 ${sideText} ${parsed.name}（${parsed.symbol}）${parsed.isNewStock ? "【新增持股】" : ""}\n` +
-      `${money(parsed.shares)} 股 @${parsed.price}，成交金額 ${money(amount)} 元\n` +
-      `${fees}（估算）\n` +
-      `成交日 ${parsed.tradeDate}${parsed.tradeDate !== t ? "（補登）" : ""}\n` +
-      `股數：${money(position.shares)} → ${money(preview.position.shares)}` +
-      (parsed.side === "buy" && preview.position.cost !== null ? `\n平均成本：${preview.position.cost}` : "");
-    await sendTelegramButtons(botToken, chatId, card, [
-      { text: "✅ 確認記錄", data: `trade:ok:${pendingRef.id}` },
-      { text: "取消", data: `trade:no:${pendingRef.id}` },
-    ]);
+    await proposeTrade(botToken, chatId, uid, held, parsed, t);
     return true;
   } catch (err: any) {
     logFirestoreError("Telegram trade command", err);
     await sendTelegramMsg(botToken, chatId, "⚠️ 記錄時發生錯誤，這筆沒有寫入，請稍後再試。");
     return true;
   }
+}
+
+
+type HeldRow = Awaited<ReturnType<typeof loadHeld>>[number];
+
+/** 回一張確認卡（固定格式與口語共用） */
+async function proposeTrade(botToken: string, chatId: string, uid: string, held: HeldRow[], parsed: ParsedTrade, t: string) {
+  const pendingRef = ctx.adminDb.collection("pending_trades").doc();
+  // 預覽：用目前股數算一次，讓使用者看到費用與交易後股數
+  const stock = held.find(s => s.symbol === parsed.symbol);
+  const position = { shares: stock?.shares || 0, cost: stock?.cost ?? null };
+  let preview;
+  try {
+    preview = applyTrade(parsed.symbol, position, {
+      side: parsed.side, shares: parsed.shares, price: parsed.price, tradeDate: parsed.tradeDate,
+      recordedAt: new Date().toISOString(), recordedDate: t, id: "preview",
+    });
+  } catch (err) {
+    await sendTelegramMsg(botToken, chatId, err instanceof TradeError ? `⚠️ ${err.message}` : "⚠️ 無法計算這筆交易");
+    return;
+  }
+
+  await pendingRef.set({
+    uid, chatId, kind: "trade", docId: stock?.docId || parsed.symbol, trade: parsed, createdAt: Date.now(),
+  });
+
+  const sideText = parsed.side === "buy" ? "買進" : "賣出";
+  const amount = Math.floor(parsed.shares * parsed.price + 1e-6);
+  const fees = preview.trade.side === "sell"
+    ? `手續費 ${money(preview.trade.fee)} 元、證交稅 ${money(preview.trade.tax)} 元`
+    : `手續費 ${money(preview.trade.fee)} 元`;
+  const card =
+    `📝 ${sideText} ${parsed.name}（${parsed.symbol}）${parsed.isNewStock ? "【新增持股】" : ""}\n` +
+    `${money(parsed.shares)} 股 @${parsed.price}，成交金額 ${money(amount)} 元\n` +
+    `${fees}（估算）\n` +
+    `成交日 ${parsed.tradeDate}${parsed.tradeDate !== t ? "（補登）" : ""}\n` +
+    `股數：${money(position.shares)} → ${money(preview.position.shares)}` +
+    (parsed.side === "buy" && preview.position.cost !== null ? `\n平均成本：${preview.position.cost}` : "");
+  await sendTelegramButtons(botToken, chatId, card, [
+    { text: "✅ 確認記錄", data: `trade:ok:${pendingRef.id}` },
+    { text: "取消", data: `trade:no:${pendingRef.id}` },
+  ]);
 }
 
 /** 處理確認卡上的按鈕 */
