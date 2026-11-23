@@ -60,7 +60,7 @@ export async function handleTradeText(botToken: string, chatIdRaw: number | stri
   if (!isCommand && !isSpoken) return false;
   const chatId = String(chatIdRaw);
 
-  if (!ctx.adminDb || ctx.firestoreAvailable === false) {
+  if (!ctx.adminDb) { // 不看 firestoreAvailable：冷啟動時健康檢查可能還沒跑完，直接試，失敗會被 catch
     await sendTelegramMsg(botToken, chatId, "⚠️ 資料庫暫時連不上，這筆沒有記錄，請稍後再試。");
     return true;
   }
@@ -192,7 +192,7 @@ export async function handleTradeCallback(botToken: string, cq: any): Promise<vo
     if (text && messageId) await editTelegramMessage(botToken, chatId, messageId, text);
   };
 
-  if (!ctx.adminDb || ctx.firestoreAvailable === false) {
+  if (!ctx.adminDb) { // 不看 firestoreAvailable：冷啟動時健康檢查可能還沒跑完，直接試，失敗會被 catch
     await done("資料庫暫時連不上，請稍後再按一次");
     return;
   }
